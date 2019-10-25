@@ -8,4 +8,4 @@ log/*
 result/*/*
 .DS_Store
 .idea
-Data/*
+data/*
