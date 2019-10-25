@@ -68,12 +68,12 @@ def train_gmm(opt, train_loader, model, board):
 
         grid, theta = model(agnostic, c)
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
-        warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
+        # warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
 
         visuals = [
             # [im_h, shape, im_pose],
             [c, warped_cloth, im_c],
-            [warped_grid, (warped_cloth + im) * 0.5, im]
+            [agnostic, (warped_cloth + im) * 0.5, im]
         ]
 
         loss = criterionL1(warped_cloth, im_c)
