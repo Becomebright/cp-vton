@@ -1,6 +1,7 @@
 # coding=utf-8
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import init
 from torchvision import models
 import os
@@ -54,6 +55,7 @@ def init_weights(net, init_type='normal'):
 
 
 class FeatureExtraction(nn.Module):
+    # TODO: 先relu还是先bn？
     def __init__(self, input_nc, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(FeatureExtraction, self).__init__()
         downconv = nn.Conv2d(input_nc, ngf, kernel_size=4, stride=2, padding=1)
@@ -85,7 +87,7 @@ class FeatureL2Norm(torch.nn.Module):
         return torch.div(feature, norm)
 
 
-class FeatureCorrelation(nn.Module):
+class FeatureCorrelation(nn.Module):  # ??
     def __init__(self):
         super(FeatureCorrelation, self).__init__()
 
@@ -101,6 +103,8 @@ class FeatureCorrelation(nn.Module):
 
 
 class FeatureRegression(nn.Module):
+    # TODO: 先relu还是先bn？
+    # [conv(4*4, s=2, p=1) - relu - bn] * 2 - [conv(3*3, s=1, p=1) - relu - bn] * 2 - fc(, 50)
     def __init__(self, input_nc=512, output_dim=6, use_cuda=True):
         super(FeatureRegression, self).__init__()
         self.conv = nn.Sequential(
@@ -211,8 +215,8 @@ class TpsGridGen(nn.Module):
         if theta.dim() == 2:
             theta = theta.unsqueeze(2).unsqueeze(3)
         # points should be in the [B,H,W,2] format,
-        # where points[:,:,:,0] are the X coords  
-        # and points[:,:,:,1] are the Y coords  
+        # where points[:,:,:,0] are the X coords
+        # and points[:,:,:,1] are the Y coords
 
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
@@ -417,12 +421,12 @@ class VGGLoss(nn.Module):
         return loss
 
 
-class GMM(nn.Module):
-    """ Geometric Matching Module
+class CGM(nn.Module):
+    """ Convolutional geometric matcher
     """
 
     def __init__(self, opt):
-        super(GMM, self).__init__()
+        super(CGM, self).__init__()
         self.extractionA = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
         self.extractionB = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()

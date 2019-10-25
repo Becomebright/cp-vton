@@ -6,3 +6,6 @@ data/test/*
 log/*
 *.sh
 result/*/*
+.DS_Store
+.idea
+Data/*
