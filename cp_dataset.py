@@ -29,7 +29,7 @@ class CPDataset(data.Dataset):
         self.data_path = osp.join(opt.dataroot, opt.datamode)
         self.transform = transforms.Compose([
             transforms.ToTensor(),  # [H,W,C] to [C,H,W] and [0,255] to [0.0,1.0]
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # [0.0,1.0] to [-1.0,1.0]
+            transforms.Normalize((0.5,), (0.5,))  # [0.0,1.0] to [-1.0,1.0]
         ])
 
         # load data list
@@ -77,37 +77,37 @@ class CPDataset(data.Dataset):
             pose_data = np.array(pose_data)
             pose_data = pose_data.reshape((-1, 3))  # 18 key points
 
-            left_shoulder_x = pose_data[3, 0]
-            left_shoulder_y = pose_data[3, 1]
-            right_shoulder_x = pose_data[0, 0]
-            right_shoulder_y = pose_data[0, 1]
+            left_shoulder_x = int(pose_data[5, 0])
+            left_shoulder_y = int(pose_data[5, 1])
+            right_shoulder_x = int(pose_data[2, 0])
+            right_shoulder_y = int(pose_data[2, 1])
             dx = np.abs(right_shoulder_x - left_shoulder_x)
-            dy = 0.3 * dx
-            neck_x = pose_data[13, 0]
-            neck_y = pose_data[13, 1]
-            parse_neck = np.zeros((self.fine_width, self.fine_height))
+            parse_neck = np.zeros((self.fine_height, self.fine_width))
             parse_neck[
-                np.max(0, neck_x - 0.5 * dx):min(self.fine_width, neck_x + 0.5 * dx),
-                np.max(0, neck_y - 0.5 * dy):np.min(self.fine_height, neck_y + 0.5 * dy)] = 1
+                max(0, left_shoulder_y - int(0.35*dx)) : max(left_shoulder_y, right_shoulder_y) + int(0.3*dx),
+                min(left_shoulder_x, right_shoulder_x) : max(left_shoulder_x, right_shoulder_x)] = 1
 
-        # point_num = pose_data.shape[0]
-        # pose_map = torch.zeros(point_num, self.fine_height, self.fine_width)
-        # r = self.radius
-        # im_pose = Image.new('L', (self.fine_width, self.fine_height))
-        # pose_draw = ImageDraw.Draw(im_pose)
-        # for i in range(point_num):
-        #     one_map = Image.new('L', (self.fine_width, self.fine_height))
-        #     draw = ImageDraw.Draw(one_map)
-        #     pointx = pose_data[i, 0]
-        #     pointy = pose_data[i, 1]
-        #     if pointx > 1 and pointy > 1:
-        #         draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
-        #         pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
-        #     one_map = self.transform(one_map)
-        #     pose_map[i] = one_map[0]
-        #
-        # # just for visualization
-        # im_pose = self.transform(im_pose)
+        point_num = pose_data.shape[0]
+        pose_map = torch.zeros(point_num, self.fine_height, self.fine_width)
+        r = self.radius
+        im_pose = Image.new('L', (self.fine_width, self.fine_height))
+        pose_draw = ImageDraw.Draw(im_pose)
+        for i in range(point_num):
+            one_map = Image.new('L', (self.fine_width, self.fine_height))
+            draw = ImageDraw.Draw(one_map)
+            pointx = pose_data[i, 0]
+            pointy = pose_data[i, 1]
+            if pointx > 1 and pointy > 1:
+                draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
+                if i == 2 or i == 5:
+                    pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'red', 'red')
+                else:
+                    pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
+            one_map = self.transform(one_map)
+            pose_map[i] = one_map[0]
+        
+        # just for visualization
+        im_pose = self.transform(im_pose)
 
         # load parsing image
         # 0=Background
@@ -118,7 +118,7 @@ class CPDataset(data.Dataset):
         parse_name = im_name.replace('.jpg', '.png')
         im_parse = Image.open(osp.join(self.data_path, 'image-parse', parse_name))
         parse_array = np.array(im_parse)
-        # parse_shape = (parse_array > 0).astype(np.float32)
+        parse_shape = (parse_array > 0).astype(np.float32)
         parse_head = (parse_array == 1).astype(np.float32) + \
                      (parse_array == 2).astype(np.float32) + \
                      (parse_array == 4).astype(np.float32) + \
@@ -133,24 +133,24 @@ class CPDataset(data.Dataset):
                            (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
 
         def logical_minux(x, y):
-            return x - np.logical_and(x, y)
+            return x ^ np.logical_and(x, y)
         parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
 
         # shape downsample
-        # parse_shape = Image.fromarray((parse_shape * 255).astype(np.uint8))
-        # parse_shape = parse_shape.resize((self.fine_width // 16, self.fine_height // 16), Image.BILINEAR)
-        # parse_shape = parse_shape.resize((self.fine_width, self.fine_height), Image.BILINEAR)
-        # shape = self.transform(parse_shape)  # [-1,1]
-        # phead = torch.from_numpy(parse_head)  # [0,1]
+        parse_shape = Image.fromarray((parse_shape * 255).astype(np.uint8))
+        parse_shape = parse_shape.resize((self.fine_width // 16, self.fine_height // 16), Image.BILINEAR)
+        parse_shape = parse_shape.resize((self.fine_width, self.fine_height), Image.BILINEAR)
+        shape = self.transform(parse_shape)  # [-1,1]
+        phead = torch.from_numpy(parse_head)  # [0,1]
         pcm = torch.from_numpy(parse_cloth)  # [0,1]
         person = torch.from_numpy(parse_upper_body)  # [0,1]
 
         # upper cloth
         im_c = im * pcm + (1 - pcm)  # [-1,1], fill 1 for other parts
-        # im_h = im * phead - (1 - phead)  # [-1,1], fill 0 for other parts
+        im_h = im * phead - (1 - phead)  # [-1,1], fill 0 for other parts
 
         # cloth-agnostic representation
-        agnostic = im * (1 - person)  # [-1,1], fill 0 for other parts
+        agnostic = im * (~person)  # [-1,1], fill 0 for other parts
 
         if self.stage == 'GMM':
             im_g = Image.open('grid.png')
@@ -166,10 +166,12 @@ class CPDataset(data.Dataset):
             'image': im,  # for visualization
             'agnostic': agnostic,  # for input
             'parse_cloth': im_c,  # for ground truth
-            # 'shape': shape,  # for visualization
-            # 'head': im_h,  # for visualization
-            # 'pose_image': im_pose,  # for visualization
+            'parse_neck': parse_neck[np.newaxis, :],
+            'shape': shape,  # for visualization
+            'head': im_h,  # for visualization
+            'pose_image': im_pose,  # for visualization
             'grid_image': im_g,  # for visualization
+            'parse_img': parse_array
         }
 
         return result

@@ -57,23 +57,25 @@ def train_gmm(opt, train_loader, model, board):
         inputs = train_loader.next_batch()
 
         im = inputs['image'].cuda()
-        # im_pose = inputs['pose_image'].cuda()
-        # im_h = inputs['head'].cuda()
-        # shape = inputs['shape'].cuda()
+        im_pose = inputs['pose_image'].cuda()
+        im_h = inputs['head'].cuda()
+        shape = inputs['shape'].cuda()
         agnostic = inputs['agnostic'].cuda()
         c = inputs['cloth'].cuda()
         # cm = inputs['cloth_mask'].cuda()
         im_c = inputs['parse_cloth'].cuda()
         im_g = inputs['grid_image'].cuda()
+        parse_neck = inputs['parse_neck'].cuda()
 
         grid, theta = model(agnostic, c)
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
         # warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
 
         visuals = [
-            # [im_h, shape, im_pose],
+            [im_h, shape, im_pose],
             [c, warped_cloth, im_c],
-            [agnostic, (warped_cloth + im) * 0.5, im]
+            # [agnostic, (warped_cloth + im) * 0.5, im]
+            [agnostic, parse_neck, im]
         ]
 
         loss = criterionL1(warped_cloth, im_c)
