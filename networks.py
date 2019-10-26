@@ -1,6 +1,7 @@
 # coding=utf-8
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import init
 from torchvision import models
 import os
@@ -54,25 +55,31 @@ def init_weights(net, init_type='normal'):
 
 
 class FeatureExtraction(nn.Module):
-    def __init__(self, input_nc, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_dropout=False):
+    def __init__(self, input_nc, ngf=64, n_layers=5, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(FeatureExtraction, self).__init__()
-        downconv = nn.Conv2d(input_nc, ngf, kernel_size=4, stride=2, padding=1)
-        model = [downconv, nn.ReLU(True), norm_layer(ngf)]
-        for i in range(n_layers):
-            in_ngf = 2 ** i * ngf if 2 ** i * ngf < 512 else 512
-            out_ngf = 2 ** (i + 1) * ngf if 2 ** i * ngf < 512 else 512
-            downconv = nn.Conv2d(in_ngf, out_ngf, kernel_size=4, stride=2, padding=1)
-            model += [downconv, nn.ReLU(True)]
-            model += [norm_layer(out_ngf)]
-        model += [nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1), nn.ReLU(True)]
-        model += [norm_layer(512)]
-        model += [nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1), nn.ReLU(True)]
 
-        self.model = nn.Sequential(*model)
-        init_weights(self.model, init_type='normal')
+        self.features = []
+        self.layers = []
+        in_channel = input_nc
+        out_channel = ngf
+        for i in range(n_layers):
+            self.layers.append(nn.Sequential(
+                nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(True),
+                norm_layer(out_channel),
+                nn.Conv2d(out_channel, out_channel, kernel_size=4, stride=2, padding=1),
+                nn.ReLU(True),
+                norm_layer(out_channel)
+            ))
+            in_channel = out_channel
+            out_channel *= 2
+            init_weights(self.layers[i], init_type='normal')
 
     def forward(self, x):
-        return self.model(x)
+        for layer in self.layers:
+            x = layer(x)
+            self.features.append(x)
+        return x
 
 
 class FeatureL2Norm(torch.nn.Module):
@@ -117,7 +124,7 @@ class FeatureRegression(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
         )
-        self.linear = nn.Linear(64 * 4 * 3, output_dim)
+        self.linear = nn.Linear(64 * 2 * 1, output_dim)
         self.tanh = nn.Tanh()
         if use_cuda:
             self.conv.cuda()
@@ -290,28 +297,65 @@ class TpsGridGen(nn.Module):
 # |num_downs|: number of downsamplings in UNet. For example,
 # if |num_downs| == 7, image of size 128x128 will become of size 1x1
 # at the bottleneck
+# model = UnetGenerator(3, 4, num_downs=6, ngf=64, norm_layer=nn.InstanceNorm2d)
 class UnetGenerator(nn.Module):
-    def __init__(self, input_nc, output_nc, num_downs, ngf=64,
+    def __init__(self, input_nc=3, output_nc=3, num_downs=5, ngf=16,
                  norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(UnetGenerator, self).__init__()
-        # construct unet structure
-        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer,
-                                             innermost=True)
-        for i in range(num_downs - 5):
-            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
-                                                 norm_layer=norm_layer, use_dropout=use_dropout)
-        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block,
-                                             norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block,
-                                             norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True,
-                                             norm_layer=norm_layer)
 
-        self.model = unet_block
+        self.extractionA = FeatureExtraction(input_nc, ngf, num_downs, nn.InstanceNorm2d)
+        self.extractionB = FeatureExtraction(input_nc, ngf, num_downs, nn.InstanceNorm2d)
+        self.decoder = Decoder(input_nc=ngf*(2**num_downs), output_nc=output_nc,
+                               num_ups=num_downs, norm_layer=norm_layer)
+        # self.l2norm = FeatureL2Norm()
 
-    def forward(self, input):
-        return self.model(input)
+    def forward(self, inputA, inputB, grid):
+        outputA = self.extractionA(inputA)
+        outputB = self.extractionB(inputB)
+        for f in self.extractionA.features:
+            self.extractionA.features = F.grid_sample(f, grid, padding_mode='zeros')
+        return self.decoder(outputA, self.extractionA.feature, outputB, self.extractionB.features)
+
+
+class Decoder(nn.Module):
+    def __init__(self, input_nc=512, output_nc=3, num_ups=5, norm_layer=nn.InstanceNorm2d):
+        super(Decoder, self).__init__()
+
+        use_bias = norm_layer == nn.InstanceNorm2d
+        self.layers = [nn.Sequential(
+            nn.Conv2d(input_nc, input_nc//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            nn.ReLU(True),
+            norm_layer(input_nc//2),
+            nn.ConvTranspose2d(input_nc//2, input_nc//2, kernel_size=4, stride=2, padding=1, bias=use_bias),
+            nn.ReLU(True),
+            norm_layer(input_nc//2)
+        )]
+
+        in_channel = input_nc
+        for i in range(num_ups - 1):
+            self.layers.appennd(nn.Sequential(
+                nn.Conv2d(in_channel, in_channel//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
+                nn.ReLU(True),
+                norm_layer(in_channel//2),
+                nn.ConvTranspose2d(in_channel//2, in_channel//4, kernel_size=4, stride=2, padding=1, bias=use_bias),
+                nn.ReLU(True),
+                norm_layer(in_channel//4)
+            ))
+            in_channel //= 2
+
+        self.conv11 = nn.Conv2d(in_channel//2, output_nc, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, featuresA, xA, featuresB, xB):
+        x = torch.cat([xA, xB], 1)
+        for i, layer in enumerate(self.layers):
+            if i == 0:
+                x = self.layers[0](x)
+            else:
+                x = torch.cat([featuresA[-i], featuresB[-i], x], 1)
+                x = self.layers[i](x)
+        return self.conv11(x)
+
+
 
 
 # Defines the submodule with skip connection.
@@ -350,11 +394,9 @@ class UnetSkipConnectionBlock(nn.Module):
             upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
             down = [downrelu, downconv, downnorm]
             up = [uprelu, upsample, upconv, upnorm]
-
+            model = down + [submodule] + up
             if use_dropout:
-                model = down + [submodule] + up + [nn.Dropout(0.5)]
-            else:
-                model = down + [submodule] + up
+                model += [nn.Dropout(0.5)]
 
         self.model = nn.Sequential(*model)
 
@@ -423,11 +465,11 @@ class GMM(nn.Module):
 
     def __init__(self, opt):
         super(GMM, self).__init__()
-        self.extractionA = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
-        self.extractionB = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.extractionA = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
+        self.extractionB = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
-        self.regression = FeatureRegression(input_nc=192, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
+        self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
         self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
 
     def forward(self, inputA, inputB):
@@ -436,10 +478,21 @@ class GMM(nn.Module):
         featureA = self.l2norm(featureA)
         featureB = self.l2norm(featureB)
         correlation = self.correlation(featureA, featureB)
-
         theta = self.regression(correlation)
         grid = self.gridGen(theta)
-        return grid, theta
+        return grid
+
+
+class WUTON(nn.Module):
+    def __init__(self, opt):
+        super(WUTON, self).__init__()
+        self.cgm = GMM(opt)
+        self.unet = UnetGenerator()
+
+    def forward(self, cloth, masked_person):
+        grid = self.cgm(cloth, masked_person)
+        synthesized_person = self.unet(cloth, masked_person, grid)
+        return grid, synthesized_person
 
 
 def save_checkpoint(model, save_path):

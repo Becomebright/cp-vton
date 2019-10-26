@@ -7,7 +7,7 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint
+from networks import GMM, UnetGenerator, VGGLoss, load_checkpoint, save_checkpoint, WUTON
 
 from tensorboardX import SummaryWriter
 from visualization import board_add_image, board_add_images
@@ -42,9 +42,66 @@ def get_opt():
     return opt
 
 
-def train_gmm(opt, train_loader, model, board):
-    model.cuda()
-    model.train()
+def train(opt, train_loader, wuton, board):
+    wuton.cuda()
+    wuton.train()
+
+    criterionWarp = nn.L1Loss()
+    criterionPerceptual = VGGLoss()
+    criterionL1 = nn.L1Loss()
+    criterionAdv = None  # TODO
+
+    optimizer = torch.optim.Adam(wuton.parameters(), lr=10e-3, betas=(0.5, 0.999))
+
+    for step in range(opt.keep_step + opt.decay_step):
+        iter_start_time = time.time()
+        inputs = train_loader.next_batch()
+        im = inputs['image'].cuda()
+        im_pose = inputs['pose_image'].cuda()
+        # im_h = inputs['head'].cuda()
+        shape = inputs['shape'].cuda()
+        agnostic = inputs['agnostic'].cuda()
+        c = inputs['cloth'].cuda()
+        # cm = inputs['cloth_mask'].cuda()
+        im_c = inputs['parse_cloth'].cuda()
+        # im_g = inputs['grid_image'].cuda()
+        parse_neck = inputs['parse_neck'].cuda()
+
+        grid, synthesized_image = wuton(agnostic, c)
+        warped_cloth = F.grid_sample(c, grid, padding_mode='border')
+        # warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
+
+        visuals = [
+            [parse_neck, shape, im_pose],
+            [c, warped_cloth, im_c],
+            # [agnostic, (warped_cloth + im) * 0.5, im]
+            [agnostic, (warped_cloth + im) * 0.5, im]
+        ]
+
+        l_warp = criterionWarp(warped_cloth, im_c)
+        l_perceptual = VGGLoss(synthesized_image, im)
+        l_L1 = criterionL1(synthesized_image, im)
+        l_adv = 0  # TODO
+        loss = l_warp + l_perceptual + l_L1 + l_adv
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if (step + 1) % opt.display_count == 0:
+            board_add_images(board, 'combine', visuals, step + 1)
+            board.add_scalar('metric', loss.item(), step + 1)
+            t = time.time() - iter_start_time
+            print('step: %8d, time: %.3f, loss: %4f, l_warp: %.4f, l_vgg: %.4f, l_L1: %.4f, l_adv: %.4f'
+                  % (step + 1, t, loss.item(), l_warp.item(), l_perceptual.item(), l_L1.item(), l_adv.item()),
+                  flush=True)
+
+        if (step + 1) % opt.save_count == 0:
+            save_checkpoint(wuton, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
+
+
+def train_gmm(opt, train_loader, cgm, unet, board):
+    cgm.cuda()
+    cgm.train()
 
     # criterion
     criterionL1 = nn.L1Loss()
@@ -75,7 +132,7 @@ def train_gmm(opt, train_loader, model, board):
             [im_h, shape, im_pose],
             [c, warped_cloth, im_c],
             # [agnostic, (warped_cloth + im) * 0.5, im]
-            [agnostic, parse_neck, im]
+            [agnostic, (warped_cloth + im) * 0.5, im]
         ]
 
         loss = criterionL1(warped_cloth, im_c)
@@ -172,22 +229,13 @@ def main():
     board = SummaryWriter(log_dir=os.path.join(opt.tensorboard_dir, opt.name))
 
     # create model & train & save the final checkpoint
-    if opt.stage == 'GMM':
-        model = GMM(opt)
-        if not opt.checkpoint == '' and os.path.exists(opt.checkpoint):
-            load_checkpoint(model, opt.checkpoint)
-        train_gmm(opt, train_loader, model, board)
-        save_checkpoint(model, os.path.join(opt.checkpoint_dir, opt.name, 'gmm_final.pth'))
-    elif opt.stage == 'TOM':
-        model = UnetGenerator(25, 4, num_downs=6, ngf=64, norm_layer=nn.InstanceNorm2d)
-        if not opt.checkpoint == '' and os.path.exists(opt.checkpoint):
-            load_checkpoint(model, opt.checkpoint)
-        train_tom(opt, train_loader, model, board)
-        save_checkpoint(model, os.path.join(opt.checkpoint_dir, opt.name, 'tom_final.pth'))
-    else:
-        raise NotImplementedError('Model [%s] is not implemented' % opt.stage)
+    model = WUTON(opt)
+    if not opt.checkpoint == '' and os.path.exists(opt.checkpoint):
+        load_checkpoint(model, opt.checkpoint)
+    train(opt, train_loader, model, board)
+    save_checkpoint(model, os.path.join(opt.checkpoint_dir, opt.name, 'wuton_final.pth'))
 
-    print('Finished training %s, nameed: %s!' % (opt.stage, opt.name))
+    print('Finished training %s, named: %s!' % (opt.stage, opt.name))
 
 
 if __name__ == "__main__":

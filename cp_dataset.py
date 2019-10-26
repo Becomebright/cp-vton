@@ -84,8 +84,8 @@ class CPDataset(data.Dataset):
             dx = np.abs(right_shoulder_x - left_shoulder_x)
             parse_neck = np.zeros((self.fine_height, self.fine_width))
             parse_neck[
-                max(0, left_shoulder_y - int(0.35*dx)) : max(left_shoulder_y, right_shoulder_y) + int(0.3*dx),
-                min(left_shoulder_x, right_shoulder_x) : max(left_shoulder_x, right_shoulder_x)] = 1
+            max(0, left_shoulder_y - int(0.35 * dx)): max(left_shoulder_y, right_shoulder_y) + int(0.3 * dx),
+            min(left_shoulder_x, right_shoulder_x): max(left_shoulder_x, right_shoulder_x)] = 1
 
         point_num = pose_data.shape[0]
         pose_map = torch.zeros(point_num, self.fine_height, self.fine_width)
@@ -105,7 +105,7 @@ class CPDataset(data.Dataset):
                     pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
             one_map = self.transform(one_map)
             pose_map[i] = one_map[0]
-        
+
         # just for visualization
         im_pose = self.transform(im_pose)
 
@@ -134,6 +134,7 @@ class CPDataset(data.Dataset):
 
         def logical_minux(x, y):
             return x ^ np.logical_and(x, y)
+
         parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
 
         # shape downsample
