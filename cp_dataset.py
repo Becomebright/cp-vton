@@ -49,9 +49,11 @@ class CPDataset(data.Dataset):
 
     def __getitem__(self, index):
         c_name = self.c_names[index]
+        another_c_name = self.c_names[0] if index==len(self.c_names)-1 else self.c_names[index+1]
         im_name = self.im_names[index]
 
         # cloth image & cloth mask
+        another_c = Image.open(osp.join(self.data_path, 'cloth', another_c_name))
         if self.stage == 'GMM':
             c = Image.open(osp.join(self.data_path, 'cloth', c_name))
             cm = Image.open(osp.join(self.data_path, 'cloth-mask', c_name))
@@ -64,6 +66,8 @@ class CPDataset(data.Dataset):
         cm_array = (cm_array >= 128).astype(np.float32)
         cm = torch.from_numpy(cm_array)  # [0,1]
         cm.unsqueeze_(0)
+
+        another_c = self.transform(another_c)
 
         # person image 
         im = Image.open(osp.join(self.data_path, 'image', im_name))
@@ -172,7 +176,9 @@ class CPDataset(data.Dataset):
             'head': im_h,  # for visualization
             'pose_image': im_pose,  # for visualization
             'grid_image': im_g,  # for visualization
-            'parse_img': parse_array
+            'parse_img': parse_array,
+            'another_c_name': another_c_name,  # for visualization
+            'another_c': another_c  # for input
         }
 
         return result

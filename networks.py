@@ -356,8 +356,6 @@ class Decoder(nn.Module):
         return self.conv11(x)
 
 
-
-
 # Defines the submodule with skip connection.
 # X -------------------identity---------------------- X
 #   |-- downsampling -- |submodule| -- upsampling --|
@@ -405,6 +403,57 @@ class UnetSkipConnectionBlock(nn.Module):
             return self.model(x)
         else:
             return torch.cat([x, self.model(x)], 1)
+
+
+class Discriminator(nn.Module):
+    # TODO: PatchGAN??
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(512, 512, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(512, 1, kernel_size=(8, 6), stride=1, padding=0),
+        )
+        init_weights(self.model, init_type='normal')
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class AdversarialLoss(nn.Module):
+    # RaSGAN-GP
+    def __init__(self):
+        super(AdversarialLoss, self).__init__()
+        self.criterion = nn.BCEWithLogitsLoss()
+
+    def forward(self, y_pred, y_pred_fake):
+        batch_size = y_pred.size()[0]
+        y = torch.ones(batch_size).cuda()
+        y2 = torch.zeros(batch_size).cuda()
+        # Discriminator loss
+        errD = (self.criterion(y_pred - torch.mean(y_pred_fake), y) +
+                self.criterion(y_pred_fake - torch.mean(y_pred), y2)) / 2.0
+
+        # Gradient penalty
+        u = torch.FloatTensor(batch_size, 1, 1, 1)
+        u.uniform_(0, 1)
+
+
+        # Generator loss (You may want to resample again from real and fake data)
+        errG = (self.criterion(y_pred - torch.mean(y_pred_fake), y2) +
+                self.criterion(y_pred_fake - torch.mean(y_pred), y)) / 2.0
 
 
 class Vgg19(nn.Module):
