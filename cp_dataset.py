@@ -178,7 +178,7 @@ class CPDataset(data.Dataset):
             'grid_image': im_g,  # for visualization
             'parse_img': parse_array,
             'another_c_name': another_c_name,  # for visualization
-            'another_c': another_c  # for input
+            'another_cloth': another_c  # for input
         }
 
         return result

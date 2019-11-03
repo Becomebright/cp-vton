@@ -12,6 +12,8 @@ from networks import VGGLoss, load_checkpoint, save_checkpoint, WUTON, Discrimin
 from tensorboardX import SummaryWriter
 from visualization import board_add_images
 
+# from apex import amp
+
 
 def get_opt():
     parser = argparse.ArgumentParser()
@@ -40,7 +42,7 @@ def get_opt():
     parser.add_argument("--n_iter", type=int, default=100000, help='Number of iteration cycles')
     parser.add_argument('--Diters', type=int, default=1, help='Number of iterations of D')
     parser.add_argument('--Giters', type=int, default=1, help='Number of iterations of G.')
-    parser.add_argument('--cuda', type='bool', default=True, help='enables cuda')
+    parser.add_argument('--cuda', type=bool, default=True, help='enables cuda')
     parser.add_argument('--penalty', type=float, default=10, help='Gradient penalty parameter for WGAN-GP')
 
     opt = parser.parse_args()
@@ -57,62 +59,98 @@ def train(opt, train_loader, G, D, board):
     criterionL1 = nn.L1Loss()
     BCE_stable = nn.BCEWithLogitsLoss()
 
+    pa = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    ap = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    ca = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    cb = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    parse_cloth = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    parse_neck = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    ya = torch.FloatTensor(opt.batch_size)
+    yb = torch.FloatTensor(opt.batch_size)
+    pa_fake = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    pb_fake = torch.FloatTensor(opt.batch_size, 3, opt.fine_height, opt.fine_width)
+    u = torch.FloatTensor(opt.batch_size, 1, 1, 1)
+    grad_outputs = torch.ones(opt.batch_size)
+
     # Everything cuda
-    if opt.cuda:
-        G = G.cuda()
-        D = D.cuda()
-        criterionWarp = criterionWarp.cuda()
-        criterionPerceptual = criterionPerceptual.cuda()
-        criterionL1 = criterionL1.cuda()
-        BCE_stable.cuda()
+    G.cuda()
+    D.cuda()
+    criterionWarp = criterionWarp.cuda()
+    criterionPerceptual = criterionPerceptual.cuda()
+    criterionL1 = criterionL1.cuda()
+    BCE_stable.cuda()
+    pa = pa.cuda()
+    ap = ap.cuda()
+    ca = ca.cuda()
+    cb = cb.cuda()
+    parse_cloth = parse_cloth.cuda()
+    parse_neck = parse_neck.cuda()
+    ya = ya.cuda()
+    yb = yb.cuda()
+    pa_fake = pa_fake.cuda()
+    pb_fake = pb_fake.cuda()
+    u = u.cuda()
+    grad_outputs = grad_outputs.cuda()
 
     # Optimizers
     optimizerD = torch.optim.Adam(D.parameters(), lr=opt.lr, betas=(0.5, 0.999))
     optimizerG = torch.optim.Adam(G.parameters(), lr=opt.lr, betas=(0.5, 0.999))
+    # D, optimizerD = amp.initialize(D, optimizerD, opt_level="O1")
+    # G, optimizerG = amp.initialize(G, optimizerG, opt_level="O1")
 
     # Fitting model
-    for i in range(opt.n_iter):
-        iter_start_time = time.time()
-
+    step_start_time = time.time()
+    for step in range(opt.n_iter):
         ########################
         # (1) Update D network #
         ########################
 
         for p in D.parameters():
-            p.require_grad = True
+            p.requires_grad = True
 
         for t in range(opt.Diters):
             D.zero_grad()
 
             inputs = train_loader.next_batch()
-            pa = inputs['image'].cuda()  # reference image
-            ap = inputs['agnostic'].cuda()
-            cb = inputs['another_cloth'].cuda()  # TODO: another cloth
+            with torch.no_grad():
+                pa.data.resize_as_(inputs['image']).copy_(inputs['image'])
+                ap.data.resize_as_(inputs['agnostic']).copy_(inputs['agnostic'])
+                cb.data.resize_as_(inputs['another_cloth']).copy_(inputs['another_cloth'])
+            del inputs
 
             current_batch_size = pa.size(0)
             ya_pred = D(pa)
-            _, pb_fake = G(cb, ap)
-            yb_pred_fake = D(pb_fake.detach())  # Detach y_pred_fake from the neural network G and put it inside D
-            ya = torch.ones(current_batch_size)
-            yb = torch.zeros(current_batch_size)
+            _, fake = G(cb, ap)
+            with torch.no_grad():
+                pb_fake.data.resize_(fake.data.size()).copy_(fake.data)
+            del fake
+            # Detach y_pred_fake from the neural network G and put it inside D
+            with torch.no_grad():
+                yb_pred_fake = D(pb_fake.detach())
+                ya.resize_(current_batch_size).fill_(1)
+                yb.resize_(current_batch_size).fill_(0)
 
             errD = (BCE_stable(ya_pred - torch.mean(yb_pred_fake), ya) +
-                    BCE_stable(yb_pred_fake - torch.mean(ya_pred), yb)) / 2
+                    BCE_stable(yb_pred_fake - torch.mean(ya_pred), yb)) / 2.0
+            # with amp.scale_loss(errD, optimizerD) as scaled_loss:
+            #     scaled_loss.backward()
             errD.backward()
 
             # Gradient penalty
-            u = torch.FloatTensor(current_batch_size, 1, 1, 1).uniform_(0, 1)
-            x_both = pa.data * u + pb_fake.data * (1. - u)
-            if opt.cuda:
-                x_both = x_both.cuda()
+            with torch.no_grad():
+                u.data.resize_(current_batch_size, 1, 1, 1)
+                grad_outputs.resize_(current_batch_size)
+            x_both = pa.data * u + pb_fake.data * (1. - u).cuda()
             # We only want the gradients with respect to x_both
             x_both = Variable(x_both, requires_grad=True)
             grad = torch.autograd.grad(outputs=D(x_both), inputs=x_both,
-                                       grad_outputs=torch.ones(current_batch_size), retain_graph=True,
+                                       grad_outputs=grad_outputs, retain_graph=True,
                                        create_graph=True, only_inputs=True)[0]
             # We need to norm 3 times (over n_colors x image_size x image_size) to get only a vector of size
             # "batch_size"
             grad_penalty = opt.penalty * ((grad.norm(2, 1).norm(2, 1).norm(2, 1) - 1) ** 2).mean()
+            # with amp.scale_loss(grad_penalty, optimizerD) as scaled_loss:
+            #     scaled_loss.backward()
             grad_penalty.backward()
 
             optimizerD.step()
@@ -124,41 +162,46 @@ def train(opt, train_loader, G, D, board):
         for p in D.parameters():
             p.requires_grad = False
 
-        for step in range(opt.Giters):
+        for t in range(opt.Giters):
             G.zero_grad()
 
             inputs = train_loader.next_batch()
-            pa = inputs['image'].cuda()  # reference image
-            # pose_a = inputs['pose_image'].cuda()
-            ap = inputs['agnostic'].cuda()
-            ca = inputs['cloth'].cuda()
-            cb = inputs['another_cloth'].cuda()  # TODO: another cloth
-            parse_cloth = inputs['parse_cloth'].cuda()  # c_{a,p}
-            parse_neck = inputs['parse_neck'].cuda()
+            with torch.no_grad():
+                pa.data.resize_as_(inputs['image']).copy_(inputs['image'])
+                ap.data.resize_as_(inputs['agnostic']).copy_(inputs['agnostic'])
+                cb.data.resize_as_(inputs['another_cloth']).copy_(inputs['another_cloth'])
+                ca.data.resize_as_(inputs['cloth']).copy_(inputs['cloth'])
+                parse_cloth.resize_as_(inputs['parse_cloth']).copy_(inputs['parse_cloth'])
+                parse_neck.resize_as_(inputs['parse_neck']).copy_(inputs['parse_neck'])
+            del inputs
 
             current_batch_size = pa.size(0)
 
-            grid_a, pa_fake = G(ap, ca)
+            grid_a, fake = G(ca, ap)
+            pa_fake.data.resize_(fake.data.size()).copy_(fake.data)
+            del fake
             warped_cloth_a = F.grid_sample(ca, grid_a, padding_mode='border')
-            grid_b, pb_fake = G(ap, cb)
+            grid_b, fake = G(cb, ap)
+            pb_fake.data.resize_(fake.data.size()).copy_(fake.data)
+            del fake
             warped_cloth_b = F.grid_sample(cb, grid_b, padding_mode='border')
 
             ya_pred = D(pa)
             yb_pred_fake = D(pb_fake)
-            ya = torch.ones(current_batch_size)
-            yb = torch.zeros(current_batch_size)
+            ya.resize_(current_batch_size).fill_(1)
+            yb.resize_(current_batch_size).fill_(0)
 
-            visuals = [     # TODO
+            visuals = [
                 [cb, warped_cloth_b, pb_fake],
                 [ca, warped_cloth_a, pa_fake],
-                [parse_neck, ap, pa]
+                [ap, parse_cloth, pa]
                 # [cb, (warped_cloth_b + pa) * 0.5, pa],
                 # [ca, warped_cloth_a, parse_cloth],
                 # [parse_neck, (warped_cloth_a + pa) * 0.5, pa]
             ]
 
             # Non-saturating
-            l_adv = (BCE_stable(ya_pred - torch.mean(yb_pred_fake), yb) +
+            l_adv = 0.1 * (BCE_stable(ya_pred - torch.mean(yb_pred_fake), yb) +
                     BCE_stable(yb_pred_fake - torch.mean(ya_pred), ya)) / 2
             l_warp = criterionWarp(warped_cloth_a, parse_cloth)
             l_perceptual = criterionPerceptual(pa_fake, pa)
@@ -166,132 +209,27 @@ def train(opt, train_loader, G, D, board):
             loss = l_warp + l_perceptual + l_L1 + l_adv
 
             optimizerG.zero_grad()
+            # with amp.scale_loss(loss, optimizerG) as scaled_loss:
+            #     scaled_loss.backward()
             loss.backward()
             optimizerG.step()
 
             if (step + 1) % opt.display_count == 0:
                 board_add_images(board, 'combine', visuals, step + 1)
-                board.add_scalar('metric', loss.item(), step + 1)
-                t = time.time() - iter_start_time
-                print('step: %8d, time: %.3f, loss: %4f, l_warp: %.4f, l_vgg: %.4f, l_L1: %.4f, l_adv: %.4f'
-                      % (step + 1, t, loss.item(), l_warp.item(), l_perceptual.item(), l_L1.item(), l_adv.item()),
+                board.add_scalar('l_warp', l_warp.item(), step + 1)
+                board.add_scalar('l_perceptual', l_perceptual.item(), step + 1)
+                board.add_scalar('l_L1', l_L1.item(), step + 1)
+                board.add_scalar('l_adv', l_adv.item(), step + 1)
+                board.add_scalar('errD', errD.item(), step + 1)
+                board.add_scalar('loss', loss.item(), step + 1)
+                t = time.time() - step_start_time
+                print('step: %8d, time: %.3f, loss: %4f, l_warp: %.4f, l_vgg: %.4f, l_L1: %.4f, l_adv: %.4f, errD: %.4f'
+                      % (step + 1, t, loss.item(), l_warp.item(), l_perceptual.item(), l_L1.item(), l_adv.item(), errD.item()),
                       flush=True)
+                step_start_time = time.time()
 
             if (step + 1) % opt.save_count == 0:
                 save_checkpoint(G, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
-
-
-# def train_gmm(opt, train_loader, cgm, unet, board):
-#     cgm.cuda()
-#     cgm.train()
-#
-#     # criterion
-#     criterionL1 = nn.L1Loss()
-#
-#     # optimizer
-#     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, betas=(0.5, 0.999))
-#
-#     for step in range(opt.keep_step + opt.decay_step):
-#         iter_start_time = time.time()
-#         inputs = train_loader.next_batch()
-#
-#         im = inputs['image'].cuda()
-#         im_pose = inputs['pose_image'].cuda()
-#         im_h = inputs['head'].cuda()
-#         shape = inputs['shape'].cuda()
-#         agnostic = inputs['agnostic'].cuda()
-#         c = inputs['cloth'].cuda()
-#         # cm = inputs['cloth_mask'].cuda()
-#         im_c = inputs['parse_cloth'].cuda()
-#         im_g = inputs['grid_image'].cuda()
-#         parse_neck = inputs['parse_neck'].cuda()
-#
-#         grid, theta = model(agnostic, c)
-#         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
-#         # warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
-#
-#         visuals = [
-#             [im_h, shape, im_pose],
-#             [c, warped_cloth, im_c],
-#             # [agnostic, (warped_cloth + im) * 0.5, im]
-#             [agnostic, (warped_cloth + im) * 0.5, im]
-#         ]
-#
-#         loss = criterionL1(warped_cloth, im_c)
-#         optimizer.zero_grad()
-#         loss.backward()
-#         optimizer.step()
-#
-#         if (step + 1) % opt.display_count == 0:
-#             board_add_images(board, 'combine', visuals, step + 1)
-#             board.add_scalar('metric', loss.item(), step + 1)
-#             t = time.time() - iter_start_time
-#             print('step: %8d, time: %.3f, loss: %4f' % (step + 1, t, loss.item()), flush=True)
-#
-#         # if (step + 1) % opt.save_count == 0:
-#         #     save_checkpoint(model, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
-#
-#
-# def train_tom(opt, train_loader, model, board):
-#     model.cuda()
-#     model.train()
-#
-#     # criterion
-#     criterionL1 = nn.L1Loss()
-#     criterionVGG = VGGLoss()
-#     criterionMask = nn.L1Loss()
-#
-#     # optimizer
-#     optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, betas=(0.5, 0.999))
-#     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: 1.0 -
-#                                                                                     max(0,
-#                                                                                         step - opt.keep_step) / float(
-#         opt.decay_step + 1))
-#
-#     for step in range(opt.keep_step + opt.decay_step):
-#         iter_start_time = time.time()
-#         inputs = train_loader.next_batch()
-#
-#         im = inputs['image'].cuda()
-#         im_pose = inputs['pose_image']
-#         im_h = inputs['head']
-#         shape = inputs['shape']
-#
-#         agnostic = inputs['agnostic'].cuda()
-#         c = inputs['cloth'].cuda()
-#         cm = inputs['cloth_mask'].cuda()
-#
-#         outputs = model(torch.cat([agnostic, c], 1))
-#         p_rendered, m_composite = torch.split(outputs, 3, 1)
-#         p_rendered = F.tanh(p_rendered)
-#         m_composite = F.sigmoid(m_composite)
-#         p_tryon = c * m_composite + p_rendered * (1 - m_composite)
-#
-#         visuals = [[im_h, shape, im_pose],
-#                    [c, cm * 2 - 1, m_composite * 2 - 1],
-#                    [p_rendered, p_tryon, im]]
-#
-#         loss_l1 = criterionL1(p_tryon, im)
-#         loss_vgg = criterionVGG(p_tryon, im)
-#         loss_mask = criterionMask(m_composite, cm)
-#         loss = loss_l1 + loss_vgg + loss_mask
-#         optimizer.zero_grad()
-#         loss.backward()
-#         optimizer.step()
-#
-#         if (step + 1) % opt.display_count == 0:
-#             board_add_images(board, 'combine', visuals, step + 1)
-#             board.add_scalar('metric', loss.item(), step + 1)
-#             board.add_scalar('L1', loss_l1.item(), step + 1)
-#             board.add_scalar('VGG', loss_vgg.item(), step + 1)
-#             board.add_scalar('MaskL1', loss_mask.item(), step + 1)
-#             t = time.time() - iter_start_time
-#             print('step: %8d, time: %.3f, loss: %.4f, l1: %.4f, vgg: %.4f, mask: %.4f'
-#                   % (step + 1, t, loss.item(), loss_l1.item(),
-#                      loss_vgg.item(), loss_mask.item()), flush=True)
-#
-#         if (step + 1) % opt.save_count == 0:
-#             save_checkpoint(model, os.path.join(opt.checkpoint_dir, opt.name, 'step_%06d.pth' % (step + 1)))
 
 
 def main():
@@ -311,6 +249,8 @@ def main():
     board = SummaryWriter(log_dir=os.path.join(opt.tensorboard_dir, opt.name))
 
     # create model & train & save the final checkpoint
+    # G = nn.DataParallel(WUTON(opt), device_ids=[0, 1, 2, 3])
+    # D = nn.DataParallel(Discriminator(), device_ids=[0, 1, 2, 3])
     G = WUTON(opt)
     D = Discriminator()
     if not opt.checkpoint == '' and os.path.exists(opt.checkpoint):  # TODO

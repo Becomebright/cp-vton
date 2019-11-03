@@ -58,8 +58,7 @@ class FeatureExtraction(nn.Module):
     def __init__(self, input_nc, ngf=64, n_layers=5, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(FeatureExtraction, self).__init__()
 
-        self.features = []
-        self.layers = []
+        self.layers = nn.ModuleList()
         in_channel = input_nc
         out_channel = ngf
         for i in range(n_layers):
@@ -76,9 +75,11 @@ class FeatureExtraction(nn.Module):
             init_weights(self.layers[i], init_type='normal')
 
     def forward(self, x):
+        self.features = []
         for layer in self.layers:
             x = layer(x)
             self.features.append(x)
+        self.features.pop()
         return x
 
 
@@ -218,14 +219,16 @@ class TpsGridGen(nn.Module):
         if theta.dim() == 2:
             theta = theta.unsqueeze(2).unsqueeze(3)
         # points should be in the [B,H,W,2] format,
-        # where points[:,:,:,0] are the X coords  
-        # and points[:,:,:,1] are the Y coords  
+        # where points[:,:,:,0] are the X coords
+        # and points[:,:,:,1] are the Y coords
 
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
         # split theta into point coordinates
         Q_X = theta[:, :self.N, :, :].squeeze(3)
         Q_Y = theta[:, self.N:, :, :].squeeze(3)
+        # print('Q_X: ' + str(Q_X.device))
+        # print('P_X_base: ' + str(self.P_X_base.device))
         Q_X = Q_X + self.P_X_base.expand_as(Q_X)
         Q_Y = Q_Y + self.P_Y_base.expand_as(Q_Y)
 
@@ -309,12 +312,14 @@ class UnetGenerator(nn.Module):
                                num_ups=num_downs, norm_layer=norm_layer)
         # self.l2norm = FeatureL2Norm()
 
-    def forward(self, inputA, inputB, grid):
+    def forward(self, inputA, inputB, theta):
         outputA = self.extractionA(inputA)
         outputB = self.extractionB(inputB)
-        for f in self.extractionA.features:
-            self.extractionA.features = F.grid_sample(f, grid, padding_mode='zeros')
-        return self.decoder(outputA, self.extractionA.feature, outputB, self.extractionB.features)
+        for i, f in enumerate(self.extractionA.features):
+            gridGen = TpsGridGen(f.size(2), f.size(3), use_cuda=True, grid_size=5)
+            grid = gridGen(theta)
+            self.extractionA.features[i] = F.grid_sample(f, grid, padding_mode='zeros')
+        return self.decoder(outputA, self.extractionA.features, outputB, self.extractionB.features)
 
 
 class Decoder(nn.Module):
@@ -322,18 +327,19 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
 
         use_bias = norm_layer == nn.InstanceNorm2d
-        self.layers = [nn.Sequential(
-            nn.Conv2d(input_nc, input_nc//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Sequential(
+            nn.Conv2d(input_nc, input_nc // 2, kernel_size=3, stride=1, padding=1, bias=use_bias),
             nn.ReLU(True),
-            norm_layer(input_nc//2),
-            nn.ConvTranspose2d(input_nc//2, input_nc//2, kernel_size=4, stride=2, padding=1, bias=use_bias),
+            norm_layer(input_nc // 2),
+            nn.ConvTranspose2d(input_nc // 2, input_nc // 2, kernel_size=4, stride=2, padding=1, bias=use_bias),
             nn.ReLU(True),
-            norm_layer(input_nc//2)
-        )]
+            norm_layer(input_nc // 2)
+        ))
 
         in_channel = input_nc
         for i in range(num_ups - 1):
-            self.layers.appennd(nn.Sequential(
+            self.layers.append(nn.Sequential(
                 nn.Conv2d(in_channel, in_channel//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
                 nn.ReLU(True),
                 norm_layer(in_channel//2),
@@ -345,7 +351,7 @@ class Decoder(nn.Module):
 
         self.conv11 = nn.Conv2d(in_channel//2, output_nc, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, featuresA, xA, featuresB, xB):
+    def forward(self, xA, featuresA, xB, featuresB):
         x = torch.cat([xA, xB], 1)
         for i, layer in enumerate(self.layers):
             if i == 0:
@@ -353,7 +359,9 @@ class Decoder(nn.Module):
             else:
                 x = torch.cat([featuresA[-i], featuresB[-i], x], 1)
                 x = self.layers[i](x)
-        return self.conv11(x)
+        x = self.conv11(x)
+        x = torch.tanh(x)
+        return x
 
 
 # Defines the submodule with skip connection.
@@ -429,7 +437,7 @@ class Discriminator(nn.Module):
         init_weights(self.model, init_type='normal')
 
     def forward(self, x):
-        return self.model(x)
+        return self.model(x).view(-1)
 
 
 class AdversarialLoss(nn.Module):
@@ -519,7 +527,7 @@ class GMM(nn.Module):
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
         self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
-        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
+        # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
 
     def forward(self, inputA, inputB):
         featureA = self.extractionA(inputA)
@@ -528,19 +536,21 @@ class GMM(nn.Module):
         featureB = self.l2norm(featureB)
         correlation = self.correlation(featureA, featureB)
         theta = self.regression(correlation)
-        grid = self.gridGen(theta)
-        return grid
+        # grid = self.gridGen(theta)
+        return theta
 
 
 class WUTON(nn.Module):
     def __init__(self, opt):
         super(WUTON, self).__init__()
         self.cgm = GMM(opt)
+        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
         self.unet = UnetGenerator()
 
     def forward(self, cloth, masked_person):
-        grid = self.cgm(cloth, masked_person)
-        synthesized_person = self.unet(cloth, masked_person, grid)
+        theta = self.cgm(cloth, masked_person)
+        grid = self.gridGen(theta)
+        synthesized_person = self.unet(cloth, masked_person, theta)
         return grid, synthesized_person
 
 
