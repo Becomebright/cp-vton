@@ -43,13 +43,15 @@ class CPDataset(data.Dataset):
 
         self.im_names = im_names
         self.c_names = c_names
+        self.num_c = len(self.c_names)
 
     def name(self):
         return "CPDataset"
 
     def __getitem__(self, index):
         c_name = self.c_names[index]
-        another_c_name = self.c_names[0] if index==len(self.c_names)-1 else self.c_names[index+1]
+        rd_index = np.random.randint(0, self.num_c)  # randomly choose another cloth
+        another_c_name = self.c_names[rd_index]
         im_name = self.im_names[index]
 
         # cloth image & cloth mask
@@ -130,16 +132,21 @@ class CPDataset(data.Dataset):
         parse_cloth = (parse_array == 5).astype(np.float32) + \
                       (parse_array == 6).astype(np.float32) + \
                       (parse_array == 7).astype(np.float32)
-        parse_upper_body = (parse_array == 14).astype(np.float32) + \
-                           (parse_array == 15).astype(np.float32) + \
-                           (parse_array == 5).astype(np.float32) + \
+        # parse_upper_body = (parse_array == 14).astype(np.float32) + \
+        #                    (parse_array == 15).astype(np.float32) + \
+        #                    (parse_array == 5).astype(np.float32) + \
+        #                    (parse_array == 6).astype(np.float32) + \
+        #                    (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
+
+        parse_upper_body = (parse_array == 5).astype(np.float32) + \
                            (parse_array == 6).astype(np.float32) + \
-                           (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
+                           (parse_array == 7).astype(np.float32)  # 只遮挡衣服
 
         def logical_minux(x, y):
             return x ^ np.logical_and(x, y)
-
-        parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
+        
+        #  neck
+        # parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
 
         # shape downsample
         parse_shape = Image.fromarray((parse_shape * 255).astype(np.uint8))
@@ -155,7 +162,7 @@ class CPDataset(data.Dataset):
         im_h = im * phead - (1 - phead)  # [-1,1], fill 0 for other parts
 
         # cloth-agnostic representation
-        agnostic = im * (~person)  # [-1,1], fill 0 for other parts
+        agnostic = im * (torch.ones_like(person) - person)  # [-1,1], fill 0 for other parts
 
         if self.stage == 'GMM':
             im_g = Image.open('grid.png')
@@ -178,7 +185,7 @@ class CPDataset(data.Dataset):
             'grid_image': im_g,  # for visualization
             'parse_img': parse_array,
             'another_c_name': another_c_name,  # for visualization
-            'another_c': another_c  # for input
+            'another_cloth': another_c  # for input
         }
 
         return result

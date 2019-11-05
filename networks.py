@@ -58,8 +58,7 @@ class FeatureExtraction(nn.Module):
     def __init__(self, input_nc, ngf=64, n_layers=5, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(FeatureExtraction, self).__init__()
 
-        self.features = []
-        self.layers = []
+        self.layers = nn.ModuleList()
         in_channel = input_nc
         out_channel = ngf
         for i in range(n_layers):
@@ -76,9 +75,11 @@ class FeatureExtraction(nn.Module):
             init_weights(self.layers[i], init_type='normal')
 
     def forward(self, x):
+        self.features = []
         for layer in self.layers:
             x = layer(x)
             self.features.append(x)
+        self.features.pop()
         return x
 
 
@@ -218,14 +219,16 @@ class TpsGridGen(nn.Module):
         if theta.dim() == 2:
             theta = theta.unsqueeze(2).unsqueeze(3)
         # points should be in the [B,H,W,2] format,
-        # where points[:,:,:,0] are the X coords  
-        # and points[:,:,:,1] are the Y coords  
+        # where points[:,:,:,0] are the X coords
+        # and points[:,:,:,1] are the Y coords
 
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
         # split theta into point coordinates
         Q_X = theta[:, :self.N, :, :].squeeze(3)
         Q_Y = theta[:, self.N:, :, :].squeeze(3)
+        # print('Q_X: ' + str(Q_X.device))
+        # print('P_X_base: ' + str(self.P_X_base.device))
         Q_X = Q_X + self.P_X_base.expand_as(Q_X)
         Q_Y = Q_Y + self.P_Y_base.expand_as(Q_Y)
 
@@ -309,12 +312,14 @@ class UnetGenerator(nn.Module):
                                num_ups=num_downs, norm_layer=norm_layer)
         # self.l2norm = FeatureL2Norm()
 
-    def forward(self, inputA, inputB, grid):
+    def forward(self, inputA, inputB, theta):
         outputA = self.extractionA(inputA)
         outputB = self.extractionB(inputB)
-        for f in self.extractionA.features:
-            self.extractionA.features = F.grid_sample(f, grid, padding_mode='zeros')
-        return self.decoder(outputA, self.extractionA.feature, outputB, self.extractionB.features)
+        for i, f in enumerate(self.extractionA.features):
+            gridGen = TpsGridGen(f.size(2), f.size(3), use_cuda=True, grid_size=5)
+            grid = gridGen(theta)
+            self.extractionA.features[i] = F.grid_sample(f, grid, padding_mode='zeros')
+        return self.decoder(outputA, self.extractionA.features, outputB, self.extractionB.features)
 
 
 class Decoder(nn.Module):
@@ -322,18 +327,19 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
 
         use_bias = norm_layer == nn.InstanceNorm2d
-        self.layers = [nn.Sequential(
-            nn.Conv2d(input_nc, input_nc//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Sequential(
+            nn.Conv2d(input_nc, input_nc // 2, kernel_size=3, stride=1, padding=1, bias=use_bias),
             nn.ReLU(True),
-            norm_layer(input_nc//2),
-            nn.ConvTranspose2d(input_nc//2, input_nc//2, kernel_size=4, stride=2, padding=1, bias=use_bias),
+            norm_layer(input_nc // 2),
+            nn.ConvTranspose2d(input_nc // 2, input_nc // 2, kernel_size=4, stride=2, padding=1, bias=use_bias),
             nn.ReLU(True),
-            norm_layer(input_nc//2)
-        )]
+            norm_layer(input_nc // 2)
+        ))
 
         in_channel = input_nc
         for i in range(num_ups - 1):
-            self.layers.appennd(nn.Sequential(
+            self.layers.append(nn.Sequential(
                 nn.Conv2d(in_channel, in_channel//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
                 nn.ReLU(True),
                 norm_layer(in_channel//2),
@@ -345,7 +351,7 @@ class Decoder(nn.Module):
 
         self.conv11 = nn.Conv2d(in_channel//2, output_nc, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, featuresA, xA, featuresB, xB):
+    def forward(self, xA, featuresA, xB, featuresB):
         x = torch.cat([xA, xB], 1)
         for i, layer in enumerate(self.layers):
             if i == 0:
@@ -353,56 +359,9 @@ class Decoder(nn.Module):
             else:
                 x = torch.cat([featuresA[-i], featuresB[-i], x], 1)
                 x = self.layers[i](x)
-        return self.conv11(x)
-
-
-# Defines the submodule with skip connection.
-# X -------------------identity---------------------- X
-#   |-- downsampling -- |submodule| -- upsampling --|
-class UnetSkipConnectionBlock(nn.Module):
-    def __init__(self, outer_nc, inner_nc, input_nc=None,
-                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
-        super(UnetSkipConnectionBlock, self).__init__()
-        self.outermost = outermost
-        use_bias = norm_layer == nn.InstanceNorm2d
-
-        if input_nc is None:
-            input_nc = outer_nc
-        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4,
-                             stride=2, padding=1, bias=use_bias)
-        downrelu = nn.LeakyReLU(0.2, True)
-        downnorm = norm_layer(inner_nc)
-        uprelu = nn.ReLU(True)
-        upnorm = norm_layer(outer_nc)
-
-        if outermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downconv]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + [submodule] + up
-        elif innermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downrelu, downconv]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + up
-        else:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downrelu, downconv, downnorm]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + [submodule] + up
-            if use_dropout:
-                model += [nn.Dropout(0.5)]
-
-        self.model = nn.Sequential(*model)
-
-    def forward(self, x):
-        if self.outermost:
-            return self.model(x)
-        else:
-            return torch.cat([x, self.model(x)], 1)
+        x = self.conv11(x)
+        x = torch.tanh(x)
+        return x
 
 
 class Discriminator(nn.Module):
@@ -429,31 +388,7 @@ class Discriminator(nn.Module):
         init_weights(self.model, init_type='normal')
 
     def forward(self, x):
-        return self.model(x)
-
-
-class AdversarialLoss(nn.Module):
-    # RaSGAN-GP
-    def __init__(self):
-        super(AdversarialLoss, self).__init__()
-        self.criterion = nn.BCEWithLogitsLoss()
-
-    def forward(self, y_pred, y_pred_fake):
-        batch_size = y_pred.size()[0]
-        y = torch.ones(batch_size).cuda()
-        y2 = torch.zeros(batch_size).cuda()
-        # Discriminator loss
-        errD = (self.criterion(y_pred - torch.mean(y_pred_fake), y) +
-                self.criterion(y_pred_fake - torch.mean(y_pred), y2)) / 2.0
-
-        # Gradient penalty
-        u = torch.FloatTensor(batch_size, 1, 1, 1)
-        u.uniform_(0, 1)
-
-
-        # Generator loss (You may want to resample again from real and fake data)
-        errG = (self.criterion(y_pred - torch.mean(y_pred_fake), y2) +
-                self.criterion(y_pred_fake - torch.mean(y_pred), y)) / 2.0
+        return self.model(x).view(-1)
 
 
 class Vgg19(nn.Module):
@@ -508,40 +443,43 @@ class VGGLoss(nn.Module):
         return loss
 
 
-class GMM(nn.Module):
-    """ Geometric Matching Module
+class CGM(nn.Module):
+    """ Convoluional Geometric Matcher
     """
 
     def __init__(self, opt):
-        super(GMM, self).__init__()
+        super(CGM, self).__init__()
         self.extractionA = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.extractionB = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
         self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
-        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
+        # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
 
-    def forward(self, inputA, inputB):
-        featureA = self.extractionA(inputA)
-        featureB = self.extractionB(inputB)
+    def forward(self, cloth, masked_person):
+        featureA = self.extractionA(cloth)
+        featureB = self.extractionB(masked_person)
         featureA = self.l2norm(featureA)
         featureB = self.l2norm(featureB)
         correlation = self.correlation(featureA, featureB)
         theta = self.regression(correlation)
-        grid = self.gridGen(theta)
-        return grid
+
+        return theta
 
 
 class WUTON(nn.Module):
     def __init__(self, opt):
         super(WUTON, self).__init__()
-        self.cgm = GMM(opt)
+        self.cgm = CGM(opt)
+        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
         self.unet = UnetGenerator()
 
     def forward(self, cloth, masked_person):
-        grid = self.cgm(cloth, masked_person)
-        synthesized_person = self.unet(cloth, masked_person, grid)
-        return grid, synthesized_person
+        theta = self.cgm(cloth, masked_person)
+        grid = self.gridGen(theta)
+        warped_cloth = F.grid_sample(cloth, grid, padding_mode='border')
+        synthesized_person = self.unet(cloth, masked_person, theta)
+        return warped_cloth, synthesized_person
 
 
 def save_checkpoint(model, save_path):
