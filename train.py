@@ -23,10 +23,10 @@ def get_opt():
     parser.add_argument('-j', '--workers', type=int, default=1)
     parser.add_argument('-b', '--batch-size', type=int, default=8)
 
-    parser.add_argument("--dataroot", default="data")
+    parser.add_argument("--dataroot", default="dataset")
     parser.add_argument("--datamode", default="train")
     parser.add_argument("--stage", default="GMM")
-    parser.add_argument("--data_list", default="train_pairs.txt")
+    parser.add_argument("--data_list", default="train.csv")
     parser.add_argument("--fine_width", type=int, default=192)
     parser.add_argument("--fine_height", type=int, default=256)
     parser.add_argument("--radius", type=int, default=5)

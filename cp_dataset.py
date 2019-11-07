@@ -9,6 +9,7 @@ from PIL import ImageDraw
 import os.path as osp
 import numpy as np
 import json
+import csv
 
 
 class CPDataset(data.Dataset):
@@ -34,14 +35,23 @@ class CPDataset(data.Dataset):
 
         # load data list
         im_names = []
+        parse_names = []
         c_names = []
         with open(osp.join(opt.dataroot, opt.data_list), 'r') as f:
-            for line in f.readlines():
-                im_name, c_name = line.strip().split()
+            f_csv = csv.reader(f)
+            header = next(f_csv)
+            for row in f_csv:
+                im_name, parse_name, c_name = row  # name是相对路径，而不只是文件名
                 im_names.append(im_name)
+                parse_names.append(parse_name)
                 c_names.append(c_name)
+            # for line in f.readlines():
+            #     im_name, c_name = line.strip().split()
+            #     im_names.append(im_name)
+            #     c_names.append(c_name)
 
         self.im_names = im_names
+        self.parse_names = parse_names
         self.c_names = c_names
 
     def name(self):
@@ -51,67 +61,71 @@ class CPDataset(data.Dataset):
         c_name = self.c_names[index]
         another_c_name = self.c_names[0] if index==len(self.c_names)-1 else self.c_names[index+1]
         im_name = self.im_names[index]
+        parse_name = self.parse_names[index]
 
         # cloth image & cloth mask
-        another_c = Image.open(osp.join(self.data_path, 'cloth', another_c_name))
-        if self.stage == 'GMM':
-            c = Image.open(osp.join(self.data_path, 'cloth', c_name))
-            cm = Image.open(osp.join(self.data_path, 'cloth-mask', c_name))
-        else:
-            c = Image.open(osp.join(self.data_path, 'warp-cloth', c_name))
-            cm = Image.open(osp.join(self.data_path, 'warp-mask', c_name))
+        # another_c = Image.open(osp.join(self.data_path, 'cloth', another_c_name))
+        another_c = Image.open(another_c_name)
+        # if self.stage == 'GMM':
+        #     c = Image.open(osp.join(self.data_path, 'cloth', c_name))
+        #     cm = Image.open(osp.join(self.data_path, 'cloth-mask', c_name))
+        # else:
+        #     c = Image.open(osp.join(self.data_path, 'warp-cloth', c_name))
+        #     cm = Image.open(osp.join(self.data_path, 'warp-mask', c_name))
+        c = Image.open(c_name)
 
         c = self.transform(c)  # [-1,1]
-        cm_array = np.array(cm)
-        cm_array = (cm_array >= 128).astype(np.float32)
-        cm = torch.from_numpy(cm_array)  # [0,1]
-        cm.unsqueeze_(0)
+        # cm_array = np.array(cm)
+        # cm_array = (cm_array >= 128).astype(np.float32)
+        # cm = torch.from_numpy(cm_array)  # [0,1]
+        # cm.unsqueeze_(0)
 
         another_c = self.transform(another_c)
 
         # person image 
-        im = Image.open(osp.join(self.data_path, 'image', im_name))
+        # im = Image.open(osp.join(self.data_path, 'image', im_name))
+        im = Image.open(im_name)
         im = self.transform(im)  # [-1,1]
 
         # load pose points
-        pose_name = im_name.replace('.jpg', '_keypoints.json')
-        with open(osp.join(self.data_path, 'pose', pose_name), 'r') as f:
-            pose_label = json.load(f)
-            pose_data = pose_label['people'][0]['pose_keypoints']
-            pose_data = np.array(pose_data)
-            pose_data = pose_data.reshape((-1, 3))  # 18 key points
+        # pose_name = im_name.replace('.jpg', '_keypoints.json')
+        # with open(osp.join(self.data_path, 'pose', pose_name), 'r') as f:
+        #     pose_label = json.load(f)
+        #     pose_data = pose_label['people'][0]['pose_keypoints']
+        #     pose_data = np.array(pose_data)
+        #     pose_data = pose_data.reshape((-1, 3))  # 18 key points
+        #
+        #     left_shoulder_x = int(pose_data[5, 0])
+        #     left_shoulder_y = int(pose_data[5, 1])
+        #     right_shoulder_x = int(pose_data[2, 0])
+        #     right_shoulder_y = int(pose_data[2, 1])
+        #     dx = np.abs(right_shoulder_x - left_shoulder_x)
+        #     parse_neck = np.zeros((self.fine_height, self.fine_width))
+        #     parse_neck[
+        #     max(0, left_shoulder_y - int(0.35 * dx)): max(left_shoulder_y, right_shoulder_y) + int(0.3 * dx),
+        #     min(left_shoulder_x, right_shoulder_x): max(left_shoulder_x, right_shoulder_x)] = 1
 
-            left_shoulder_x = int(pose_data[5, 0])
-            left_shoulder_y = int(pose_data[5, 1])
-            right_shoulder_x = int(pose_data[2, 0])
-            right_shoulder_y = int(pose_data[2, 1])
-            dx = np.abs(right_shoulder_x - left_shoulder_x)
-            parse_neck = np.zeros((self.fine_height, self.fine_width))
-            parse_neck[
-            max(0, left_shoulder_y - int(0.35 * dx)): max(left_shoulder_y, right_shoulder_y) + int(0.3 * dx),
-            min(left_shoulder_x, right_shoulder_x): max(left_shoulder_x, right_shoulder_x)] = 1
-
-        point_num = pose_data.shape[0]
-        pose_map = torch.zeros(point_num, self.fine_height, self.fine_width)
-        r = self.radius
-        im_pose = Image.new('L', (self.fine_width, self.fine_height))
-        pose_draw = ImageDraw.Draw(im_pose)
-        for i in range(point_num):
-            one_map = Image.new('L', (self.fine_width, self.fine_height))
-            draw = ImageDraw.Draw(one_map)
-            pointx = pose_data[i, 0]
-            pointy = pose_data[i, 1]
-            if pointx > 1 and pointy > 1:
-                draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
-                if i == 2 or i == 5:
-                    pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'red', 'red')
-                else:
-                    pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
-            one_map = self.transform(one_map)
-            pose_map[i] = one_map[0]
+        # point_num = pose_data.shape[0]
+        # pose_map = torch.zeros(point_num, self.fine_height, self.fine_width)
+        # r = self.radius
+        # im_pose = Image.new('L', (self.fine_width, self.fine_height))
+        # pose_draw = ImageDraw.Draw(im_pose)
+        # for i in range(point_num):
+        #     one_map = Image.new('L', (self.fine_width, self.fine_height))
+        #     draw = ImageDraw.Draw(one_map)
+        #     pointx = pose_data[i, 0]
+        #     pointy = pose_data[i, 1]
+        #     if pointx > 1 and pointy > 1:
+        #         draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
+        #         if i == 2 or i == 5:
+        #             pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'red', 'red')
+        #         else:
+        #             pose_draw.rectangle((pointx - r, pointy - r, pointx + r, pointy + r), 'white', 'white')
+        #     one_map = self.transform(one_map)
+        #     pose_map[i] = one_map[0]
 
         # just for visualization
-        im_pose = self.transform(im_pose)
+        # im_pose = self.transform(im_pose)
 
         # load parsing image
         # 0=Background
@@ -119,44 +133,47 @@ class CPDataset(data.Dataset):
         # 6=Dress, 7=Coat, 8=Socks, 9=Pants, 10=Jumpsuits
         # 11=Scarf, 12=Skirt, 13=Face, 14=LeftArm, 15=RightArm
         # 16=LeftLeg, 17=RightLeg, 18=LeftShoe, 19=RightShoe
-        parse_name = im_name.replace('.jpg', '.png')
-        im_parse = Image.open(osp.join(self.data_path, 'image-parse', parse_name))
+
+        # parse_name = im_name.replace('.jpg', '.png')
+        # im_parse = Image.open(osp.join(self.data_path, 'image-parse', parse_name))
+        im_parse = Image.open(parse_name)
         parse_array = np.array(im_parse)
         parse_shape = (parse_array > 0).astype(np.float32)
-        parse_head = (parse_array == 1).astype(np.float32) + \
-                     (parse_array == 2).astype(np.float32) + \
-                     (parse_array == 4).astype(np.float32) + \
-                     (parse_array == 13).astype(np.float32)
+        # parse_head = (parse_array == 1).astype(np.float32) + \
+        #              (parse_array == 2).astype(np.float32) + \
+        #              (parse_array == 4).astype(np.float32) + \
+        #              (parse_array == 13).astype(np.float32)
         parse_cloth = (parse_array == 5).astype(np.float32) + \
                       (parse_array == 6).astype(np.float32) + \
                       (parse_array == 7).astype(np.float32)
-        parse_upper_body = (parse_array == 14).astype(np.float32) + \
-                           (parse_array == 15).astype(np.float32) + \
-                           (parse_array == 5).astype(np.float32) + \
-                           (parse_array == 6).astype(np.float32) + \
-                           (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
+        # parse_upper_body = (parse_array == 14).astype(np.float32) + \
+        #                    (parse_array == 15).astype(np.float32) + \
+        #                    (parse_array == 5).astype(np.float32) + \
+        #                    (parse_array == 6).astype(np.float32) + \
+        #                    (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
 
         def logical_minux(x, y):
             return x ^ np.logical_and(x, y)
 
         #  neck
-        parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
+        # parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
 
         # shape downsample
         parse_shape = Image.fromarray((parse_shape * 255).astype(np.uint8))
         parse_shape = parse_shape.resize((self.fine_width // 16, self.fine_height // 16), Image.BILINEAR)
         parse_shape = parse_shape.resize((self.fine_width, self.fine_height), Image.BILINEAR)
         shape = self.transform(parse_shape)  # [-1,1]
-        phead = torch.from_numpy(parse_head)  # [0,1]
+        # phead = torch.from_numpy(parse_head)  # [0,1]
         pcm = torch.from_numpy(parse_cloth)  # [0,1]
-        person = torch.from_numpy(parse_upper_body)  # [0,1]
+        # person = torch.from_numpy(parse_upper_body)  # [0,1]
 
         # upper cloth
         im_c = im * pcm + (1 - pcm)  # [-1,1], fill 1 for other parts
-        im_h = im * phead - (1 - phead)  # [-1,1], fill 0 for other parts
+        # im_h = im * phead - (1 - phead)  # [-1,1], fill 0 for other parts
 
         # cloth-agnostic representation
-        agnostic = im * (~person)  # [-1,1], fill 0 for other parts
+        # agnostic = im * (~person)  # [-1,1], fill 0 for other parts
+        agnostic = im * (torch.ones_like(im_c) - im_c)
 
         if self.stage == 'GMM':
             im_g = Image.open('grid.png')
