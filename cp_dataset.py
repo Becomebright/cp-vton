@@ -139,6 +139,7 @@ class CPDataset(data.Dataset):
         def logical_minux(x, y):
             return x ^ np.logical_and(x, y)
 
+        #  neck
         parse_upper_body = logical_minux(np.logical_or(parse_upper_body, parse_neck), parse_head)
 
         # shape downsample

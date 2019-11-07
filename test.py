@@ -7,7 +7,7 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, UnetGenerator, load_checkpoint
+from networks import CGM, UnetGenerator, load_checkpoint
 
 from tensorboardX import SummaryWriter
 from visualization import board_add_image, board_add_images, save_images
@@ -145,7 +145,7 @@ def main():
    
     # create model & train
     if opt.stage == 'GMM':
-        model = GMM(opt)
+        model = CGM(opt)
         load_checkpoint(model, opt.checkpoint)
         with torch.no_grad():
             test_gmm(opt, train_loader, model, board)

@@ -168,9 +168,9 @@ class TpsGridGen(nn.Module):
         # grid_X,grid_Y: size [1,H,W,1,1]
         self.grid_X = torch.FloatTensor(self.grid_X).unsqueeze(0).unsqueeze(3)
         self.grid_Y = torch.FloatTensor(self.grid_Y).unsqueeze(0).unsqueeze(3)
-        if use_cuda:
-            self.grid_X = self.grid_X.cuda()
-            self.grid_Y = self.grid_Y.cuda()
+        # if use_cuda:
+        #     self.grid_X = self.grid_X.cuda()
+        #     self.grid_Y = self.grid_Y.cuda()
 
         # initialize regular grid for control points P_i
         if use_regular_grid:
@@ -186,14 +186,17 @@ class TpsGridGen(nn.Module):
             self.Li = self.compute_L_inverse(P_X, P_Y).unsqueeze(0)
             self.P_X = P_X.unsqueeze(2).unsqueeze(3).unsqueeze(4).transpose(0, 4)
             self.P_Y = P_Y.unsqueeze(2).unsqueeze(3).unsqueeze(4).transpose(0, 4)
-            if use_cuda:
-                self.P_X = self.P_X.cuda()
-                self.P_Y = self.P_Y.cuda()
-                self.P_X_base = self.P_X_base.cuda()
-                self.P_Y_base = self.P_Y_base.cuda()
+            # if use_cuda:
+            #     self.P_X = self.P_X.cuda()
+            #     self.P_Y = self.P_Y.cuda()
+            #     self.P_X_base = self.P_X_base.cuda()
+            #     self.P_Y_base = self.P_Y_base.cuda()
 
     def forward(self, theta):
-        warped_grid = self.apply_transformation(theta, torch.cat((self.grid_X, self.grid_Y), 3))
+        # cuda
+        grid_X = self.grid_X.cuda()
+        grid_Y = self.grid_Y.cuda()
+        warped_grid = self.apply_transformation(theta, torch.cat((grid_X, grid_Y), 3))
 
         return warped_grid
 
@@ -211,8 +214,8 @@ class TpsGridGen(nn.Module):
         P = torch.cat((O, X, Y), 1)
         L = torch.cat((torch.cat((K, P), 1), torch.cat((P.transpose(0, 1), Z), 1)), 0)
         Li = torch.inverse(L)
-        if self.use_cuda:
-            Li = Li.cuda()
+        # if self.use_cuda:
+        #     Li = Li.cuda()
         return Li
 
     def apply_transformation(self, theta, points):
@@ -222,6 +225,13 @@ class TpsGridGen(nn.Module):
         # where points[:,:,:,0] are the X coords
         # and points[:,:,:,1] are the Y coords
 
+        # cuda
+        P_X_base = self.P_X_base.cuda()
+        P_Y_base = self.P_Y_base.cuda()
+        P_X = self.P_X.cuda()
+        P_Y = self.P_Y.cuda()
+        Li = self.Li.cuda()
+
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
         # split theta into point coordinates
@@ -229,8 +239,8 @@ class TpsGridGen(nn.Module):
         Q_Y = theta[:, self.N:, :, :].squeeze(3)
         # print('Q_X: ' + str(Q_X.device))
         # print('P_X_base: ' + str(self.P_X_base.device))
-        Q_X = Q_X + self.P_X_base.expand_as(Q_X)
-        Q_Y = Q_Y + self.P_Y_base.expand_as(Q_Y)
+        Q_X = Q_X + P_X_base.expand_as(Q_X)
+        Q_Y = Q_Y + P_Y_base.expand_as(Q_Y)
 
         # get spatial dimensions of points
         points_b = points.size()[0]
@@ -238,19 +248,19 @@ class TpsGridGen(nn.Module):
         points_w = points.size()[2]
 
         # repeat pre-defined control points along spatial dimensions of points to be transformed
-        P_X = self.P_X.expand((1, points_h, points_w, 1, self.N))
-        P_Y = self.P_Y.expand((1, points_h, points_w, 1, self.N))
+        P_X = P_X.expand((1, points_h, points_w, 1, self.N))
+        P_Y = P_Y.expand((1, points_h, points_w, 1, self.N))
 
         # compute weigths for non-linear part
-        W_X = torch.bmm(self.Li[:, :self.N, :self.N].expand((batch_size, self.N, self.N)), Q_X)
-        W_Y = torch.bmm(self.Li[:, :self.N, :self.N].expand((batch_size, self.N, self.N)), Q_Y)
+        W_X = torch.bmm(Li[:, :self.N, :self.N].expand((batch_size, self.N, self.N)), Q_X)
+        W_Y = torch.bmm(Li[:, :self.N, :self.N].expand((batch_size, self.N, self.N)), Q_Y)
         # reshape
         # W_X,W,Y: size [B,H,W,1,N]
         W_X = W_X.unsqueeze(3).unsqueeze(4).transpose(1, 4).repeat(1, points_h, points_w, 1, 1)
         W_Y = W_Y.unsqueeze(3).unsqueeze(4).transpose(1, 4).repeat(1, points_h, points_w, 1, 1)
         # compute weights for affine part
-        A_X = torch.bmm(self.Li[:, self.N:, :self.N].expand((batch_size, 3, self.N)), Q_X)
-        A_Y = torch.bmm(self.Li[:, self.N:, :self.N].expand((batch_size, 3, self.N)), Q_Y)
+        A_X = torch.bmm(Li[:, self.N:, :self.N].expand((batch_size, 3, self.N)), Q_X)
+        A_Y = torch.bmm(Li[:, self.N:, :self.N].expand((batch_size, 3, self.N)), Q_Y)
         # reshape
         # A_X,A,Y: size [B,H,W,1,3]
         A_X = A_X.unsqueeze(3).unsqueeze(4).transpose(1, 4).repeat(1, points_h, points_w, 1, 1)
@@ -364,55 +374,6 @@ class Decoder(nn.Module):
         return x
 
 
-# Defines the submodule with skip connection.
-# X -------------------identity---------------------- X
-#   |-- downsampling -- |submodule| -- upsampling --|
-class UnetSkipConnectionBlock(nn.Module):
-    def __init__(self, outer_nc, inner_nc, input_nc=None,
-                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
-        super(UnetSkipConnectionBlock, self).__init__()
-        self.outermost = outermost
-        use_bias = norm_layer == nn.InstanceNorm2d
-
-        if input_nc is None:
-            input_nc = outer_nc
-        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4,
-                             stride=2, padding=1, bias=use_bias)
-        downrelu = nn.LeakyReLU(0.2, True)
-        downnorm = norm_layer(inner_nc)
-        uprelu = nn.ReLU(True)
-        upnorm = norm_layer(outer_nc)
-
-        if outermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downconv]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + [submodule] + up
-        elif innermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downrelu, downconv]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + up
-        else:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
-            upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
-            down = [downrelu, downconv, downnorm]
-            up = [uprelu, upsample, upconv, upnorm]
-            model = down + [submodule] + up
-            if use_dropout:
-                model += [nn.Dropout(0.5)]
-
-        self.model = nn.Sequential(*model)
-
-    def forward(self, x):
-        if self.outermost:
-            return self.model(x)
-        else:
-            return torch.cat([x, self.model(x)], 1)
-
-
 class Discriminator(nn.Module):
     # TODO: PatchGAN??
     def __init__(self):
@@ -438,30 +399,6 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         return self.model(x).view(-1)
-
-
-class AdversarialLoss(nn.Module):
-    # RaSGAN-GP
-    def __init__(self):
-        super(AdversarialLoss, self).__init__()
-        self.criterion = nn.BCEWithLogitsLoss()
-
-    def forward(self, y_pred, y_pred_fake):
-        batch_size = y_pred.size()[0]
-        y = torch.ones(batch_size).cuda()
-        y2 = torch.zeros(batch_size).cuda()
-        # Discriminator loss
-        errD = (self.criterion(y_pred - torch.mean(y_pred_fake), y) +
-                self.criterion(y_pred_fake - torch.mean(y_pred), y2)) / 2.0
-
-        # Gradient penalty
-        u = torch.FloatTensor(batch_size, 1, 1, 1)
-        u.uniform_(0, 1)
-
-
-        # Generator loss (You may want to resample again from real and fake data)
-        errG = (self.criterion(y_pred - torch.mean(y_pred_fake), y2) +
-                self.criterion(y_pred_fake - torch.mean(y_pred), y)) / 2.0
 
 
 class Vgg19(nn.Module):
@@ -516,12 +453,12 @@ class VGGLoss(nn.Module):
         return loss
 
 
-class GMM(nn.Module):
-    """ Geometric Matching Module
+class CGM(nn.Module):
+    """ Convoluional Geometric Matcher
     """
 
     def __init__(self, opt):
-        super(GMM, self).__init__()
+        super(CGM, self).__init__()
         self.extractionA = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.extractionB = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
@@ -529,29 +466,30 @@ class GMM(nn.Module):
         self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
         # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
 
-    def forward(self, inputA, inputB):
-        featureA = self.extractionA(inputA)
-        featureB = self.extractionB(inputB)
+    def forward(self, cloth, masked_person):
+        featureA = self.extractionA(cloth)
+        featureB = self.extractionB(masked_person)
         featureA = self.l2norm(featureA)
         featureB = self.l2norm(featureB)
         correlation = self.correlation(featureA, featureB)
         theta = self.regression(correlation)
-        # grid = self.gridGen(theta)
+
         return theta
 
 
 class WUTON(nn.Module):
     def __init__(self, opt):
         super(WUTON, self).__init__()
-        self.cgm = GMM(opt)
+        self.cgm = CGM(opt)
         self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
         self.unet = UnetGenerator()
 
     def forward(self, cloth, masked_person):
         theta = self.cgm(cloth, masked_person)
         grid = self.gridGen(theta)
+        warped_cloth = F.grid_sample(cloth, grid, padding_mode='border')
         synthesized_person = self.unet(cloth, masked_person, theta)
-        return grid, synthesized_person
+        return warped_cloth, synthesized_person
 
 
 def save_checkpoint(model, save_path):
