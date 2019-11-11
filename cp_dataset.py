@@ -53,13 +53,15 @@ class CPDataset(data.Dataset):
         self.im_names = im_names
         self.parse_names = parse_names
         self.c_names = c_names
+        self.num_c = len(c_names)
 
     def name(self):
         return "CPDataset"
 
     def __getitem__(self, index):
         c_name = self.c_names[index]
-        another_c_name = self.c_names[0] if index==len(self.c_names)-1 else self.c_names[index+1]
+        rd_index = np.random.randint(0, self.num_c)  # randomly choose another cloth
+        another_c_name = self.c_names[rd_index]
         im_name = self.im_names[index]
         parse_name = self.parse_names[index]
 
