@@ -1,5 +1,4 @@
 # coding=utf-8
-import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +7,6 @@ from torchvision import models
 import os
 import numpy as np
 from collections import OrderedDict
-import matplotlib.pyplot as plt
 
 from human_parsing.model import network
 
@@ -506,7 +504,7 @@ class HumanParser(nn.Module):
         self.mean = torch.FloatTensor([0.406, 0.456, 0.485]).unsqueeze(0).unsqueeze(2).unsqueeze(3)
         self.std = torch.FloatTensor([0.225, 0.224, 0.229]).unsqueeze(0).unsqueeze(2).unsqueeze(3)
         self.upsample = torch.nn.Upsample(size=[473, 473], mode='bilinear', align_corners=True)  # to (473, 473)
-        self.downsample = torch.nn.Upsample(size=[opt.fine_height, opt.fine_width], mode='bilinear', align_corners=True)  # to (473, 473)
+        self.downsample = torch.nn.Upsample(size=[opt.fine_height, opt.fine_width], mode='bilinear', align_corners=True)  # to (256, 192)
 
     def _normalize(self, x):
         """
@@ -522,11 +520,11 @@ class HumanParser(nn.Module):
 
     def forward(self, image):
         """
-        :param image: (N, C, H, W)
+        :param image: (N, C, H, W); [-1, 1]
         :return: parsed_image: (N, num_classes, H, W)
         """
         img = image.clone()
-        img = (img + 1.) / 2.
+        img = (img + 1.) / 2.  # [-1,1] -> [0,1]
         img = self._normalize(img)
         img = self.upsample(img)
         parse = self.model(img)  # (N,C,H,W)

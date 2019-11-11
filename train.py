@@ -12,6 +12,7 @@ from networks import VGGLoss, load_checkpoint, save_checkpoint, WUTON, Discrimin
 from tensorboardX import SummaryWriter
 from visualization import board_add_images
 from PIL import Image
+import matplotlib.pyplot as plt
 
 
 def get_opt():
@@ -42,48 +43,27 @@ def get_opt():
     parser.add_argument('--Giters', type=int, default=1, help='Number of iterations of G.')
     parser.add_argument('--cuda', type=bool, default=True, help='enables cuda')
     parser.add_argument('--penalty', type=float, default=10, help='Gradient penalty parameter for WGAN-GP')
-    parser.add_argument("--human_parser_step", type=int, default=0, help='add human parser after some steps')
+    parser.add_argument("--human_parser_step", type=int, default=1000, help='add human parser after some steps')
 
     opt = parser.parse_args()
     return opt
 
 
-def get_palette(num_cls=20):
-    """ Returns the color map for visualizing the segmentation mask.
-    Args:
-        num_cls: Number of classes
-    Returns:
-        The color map
-    """
-    n = num_cls
-    palette = [0] * (n * 3)
-    for j in range(0, n):
-        lab = j
-        palette[j * 3 + 0] = 0
-        palette[j * 3 + 1] = 0
-        palette[j * 3 + 2] = 0
-        i = 0
-        while lab:
-            palette[j * 3 + 0] |= (((lab >> 0) & 1) << (7 - i))
-            palette[j * 3 + 1] |= (((lab >> 1) & 1) << (7 - i))
-            palette[j * 3 + 2] |= (((lab >> 2) & 1) << (7 - i))
-            i += 1
-            lab >>= 3
-    return palette
-
-
-palette = get_palette()
+cmap = plt.get_cmap('jet')
 
 
 def visualize_seg(segs):
-    # (N,H,W)
+    """
+    :param segs: (N,H,W) tensor(uint8)
+    :return: res: (N,3,H,W) tensor(float32)
+    """
     N, H, W = segs.size()
     res = torch.zeros((N, 3, H, W))
-    for i, seg in enumerate(segs):
+    for i, seg in enumerate(segs):  #(H,W)
         seg = seg.cpu().numpy()
-        output_img = Image.fromarray(np.asarray(seg, dtype=np.uint8))
-        output_img.putpalette(palette)
-        res[i] = torch.from_numpy(np.array(output_img))
+        rgba_img = cmap(seg / 15.0)
+        rgb_img = np.delete(rgba_img, 3, 2)  # (H,W,3)
+        res[i] = torch.from_numpy(np.array(rgb_img)).permute(2, 0, 1)
     return res
 
 
@@ -100,13 +80,9 @@ def train(opt, train_loader, G, D, board):
     criterionPerceptual = VGGLoss()
     criterionL1 = nn.L1Loss()
     BCE_stable = nn.BCEWithLogitsLoss()
+    criterionCloth = nn.L1Loss()
 
     # Variables
-    pa = torch.FloatTensor((opt.batch_size, 3, opt.fine_height, opt.fine_width))
-    ap = torch.FloatTensor((opt.batch_size, 3, opt.fine_height, opt.fine_width))
-    ca = torch.FloatTensor((opt.batch_size, 3, opt.fine_height, opt.fine_width))
-    cb = torch.FloatTensor((opt.batch_size, 3, opt.fine_height, opt.fine_width))
-    parse_cloth = torch.FloatTensor((opt.batch_size, 3, opt.fine_height, opt.fine_width))
     ya = torch.FloatTensor(opt.batch_size)
     yb = torch.FloatTensor(opt.batch_size)
     u = torch.FloatTensor((opt.batch_size, 1, 1, 1))
@@ -121,11 +97,8 @@ def train(opt, train_loader, G, D, board):
         criterionPerceptual = criterionPerceptual.cuda()
         criterionL1 = criterionL1.cuda()
         BCE_stable.cuda()
-        pa = pa.cuda()
-        ap = ap.cuda()
-        ca = ca.cuda()
-        cb = cb.cuda()
-        parse_cloth = parse_cloth.cuda()
+        criterionCloth = criterionCloth.cuda()
+
         ya = ya.cuda()
         yb = yb.cuda()
         u = u.cuda()
@@ -154,10 +127,9 @@ def train(opt, train_loader, G, D, board):
             D.zero_grad()
 
             inputs = train_loader.next_batch()
-            with torch.no_grad():
-                pa.resize_as_(inputs['image']).copy_(inputs['image'])
-                ap.resize_as_(inputs['agnostic']).copy_(inputs['agnostic'])
-                cb.resize_as_(inputs['another_cloth']).copy_(inputs['another_cloth'])
+            pa = inputs['image'].cuda()
+            ap = inputs['agnostic'].cuda()
+            cb = inputs['another_cloth'].cuda()
             del inputs
 
             current_batch_size = pa.size(0)
@@ -171,17 +143,14 @@ def train(opt, train_loader, G, D, board):
 
             errD = (BCE_stable(ya_pred - torch.mean(yb_pred_fake), ya) +
                     BCE_stable(yb_pred_fake - torch.mean(ya_pred), yb)) / 2.0
-            # with amp.scale_loss(errD, optimizerD) as scaled_loss:
-            #     scaled_loss.backward()
             errD.backward()
 
             # Gradient penalty
             with torch.no_grad():
                 u.resize_(current_batch_size, 1, 1, 1).uniform_(0, 1)
                 grad_outputs.data.resize_(current_batch_size)
-            x_both = pa.data * u + pb_fake.data * (1. - u)
-            if opt.cuda:
-                x_both = x_both.cuda()
+            x_both = pa * u + pb_fake * (1. - u)
+
             # We only want the gradients with respect to x_both
             x_both = Variable(x_both, requires_grad=True)
             grad = torch.autograd.grad(outputs=D(x_both), inputs=x_both,
@@ -203,12 +172,11 @@ def train(opt, train_loader, G, D, board):
 
         for t in range(opt.Giters):
             inputs = train_loader.next_batch()
-            with torch.no_grad():
-                pa.resize_as_(inputs['image']).copy_(inputs['image'])
-                ap.resize_as_(inputs['agnostic']).copy_(inputs['agnostic'])
-                ca.resize_as_(inputs['cloth']).copy_(inputs['cloth'])
-                cb.resize_as_(inputs['another_cloth']).copy_(inputs['another_cloth'])
-                parse_cloth.resize_as_(inputs['parse_cloth']).copy_(inputs['parse_cloth'])
+            pa = inputs['image'].cuda()
+            ap = inputs['agnostic'].cuda()
+            ca = inputs['cloth'].cuda()
+            cb = inputs['another_cloth'].cuda()
+            parse_cloth = inputs['parse_cloth'].cuda()
             del inputs
 
             current_batch_size = pa.size(0)
@@ -224,19 +192,21 @@ def train(opt, train_loader, G, D, board):
                                 (parse_pa_fake == 7)  # [0,1] (N,H,W)
                 parse_ca_fake = parse_ca_fake.unsqueeze(1).type_as(pa_fake)  # (N,1,H,W)
                 ca_fake = pa_fake * parse_ca_fake + (1 - parse_ca_fake)  # [-1,1]
-                parse_pa_fake = visualize_seg(parse_pa_fake)
-                if opt.cuda:
-                    parse_pa_fake = parse_pa_fake.cuda()
+                with torch.no_grad():
+                    parse_pa_fake_vis = visualize_seg(parse_pa_fake)
+                l_cloth_p = criterionCloth(ca_fake, warped_cloth_a)
             else:
-                ca_fake = torch.zeros_like(pa_fake)
-                parse_pa_fake = torch.zeros_like(pa_fake)
+                with torch.no_grad():
+                    ca_fake = torch.zeros_like(pa_fake)
+                    parse_pa_fake_vis = torch.zeros_like(pa_fake)
+                    l_cloth_p = torch.zeros(1).cuda()
 
-            l_warp = criterionWarp(warped_cloth_a, parse_cloth)
+            l_warp = 20 * criterionWarp(warped_cloth_a, parse_cloth)
             l_perceptual = criterionPerceptual(pa_fake, pa)
             l_L1 = criterionL1(pa_fake, pa)
-            loss = l_warp + l_perceptual + l_L1
+            loss_p = l_warp + l_perceptual + l_L1 + l_cloth_p
 
-            loss.backward()
+            loss_p.backward()
             optimizerG.step()
 
             # unpaired data
@@ -250,12 +220,14 @@ def train(opt, train_loader, G, D, board):
                                 (parse_pb_fake == 7)  # [0,1] (N,H,W)
                 parse_cb_fake = parse_cb_fake.unsqueeze(1).type_as(pb_fake)  # (N,1,H,W)
                 cb_fake = pb_fake * parse_cb_fake + (1 - parse_cb_fake)  # [-1,1]
-                parse_pb_fake = visualize_seg(parse_pb_fake)
-                if opt.cuda:
-                    parse_pb_fake = parse_pb_fake.cuda()
+                with torch.no_grad():
+                    parse_pb_fake_vis = visualize_seg(parse_pb_fake)
+                l_cloth_up = criterionCloth(cb_fake, warped_cloth_b)
             else:
-                cb_fake = torch.zeros_like(pb_fake)
-                parse_pb_fake = torch.zeros_like(pb_fake)
+                with torch.no_grad():
+                    cb_fake = torch.zeros_like(pb_fake)
+                    parse_pb_fake_vis = torch.zeros_like(pb_fake)
+                    l_cloth_up = torch.zeros(1).cuda()
 
             with torch.no_grad():
                 ya.data.resize_(current_batch_size).fill_(1)
@@ -264,10 +236,10 @@ def train(opt, train_loader, G, D, board):
             yb_pred_fake = D(pb_fake)
 
             # Non-saturating
-            l_adv = (BCE_stable(ya_pred - torch.mean(yb_pred_fake), yb) +
-                     BCE_stable(yb_pred_fake - torch.mean(ya_pred), ya)) / 2
-
-            l_adv.backward()
+            l_adv = 0.1 * (BCE_stable(ya_pred - torch.mean(yb_pred_fake), yb) +
+                           BCE_stable(yb_pred_fake - torch.mean(ya_pred), ya)) / 2
+            loss_up = l_adv + l_cloth_up
+            loss_up.backward()
             optimizerG.step()
 
             # visuals = [
@@ -276,24 +248,26 @@ def train(opt, train_loader, G, D, board):
             #     [ap, parse_cloth, pa]
             # ]
             visuals = [
-                [cb, warped_cloth_b, pb_fake, cb_fake, parse_pb_fake],
-                [ca, warped_cloth_a, pa_fake, ca_fake, parse_pa_fake],
+                [cb, warped_cloth_b, pb_fake, cb_fake, parse_pb_fake_vis],
+                [ca, warped_cloth_a, pa_fake, ca_fake, parse_pa_fake_vis],
                 [ap, parse_cloth, pa]
             ]
 
             if (step + 1) % opt.display_count == 0:
                 board_add_images(board, 'combine', visuals, step + 1)
+                board.add_scalar('loss_p', loss_p.item(), step + 1)
                 board.add_scalar('l_warp', l_warp.item(), step + 1)
                 board.add_scalar('l_perceptual', l_perceptual.item(), step + 1)
                 board.add_scalar('l_L1', l_L1.item(), step + 1)
+                board.add_scalar('l_cloth_p', l_cloth_p.item(), step + 1)
+                board.add_scalar('loss_up', loss_up.item(), step + 1)
                 board.add_scalar('l_adv', l_adv.item(), step + 1)
+                board.add_scalar('l_cloth_up', l_cloth_up.item(), step + 1)
                 board.add_scalar('errD', errD.item(), step + 1)
-                board.add_scalar('loss', loss.item(), step + 1)
+
                 t = time.time() - step_start_time
-                print('step: %8d, time: %.3f, loss: %4f, l_warp: %.4f, l_vgg: %.4f, l_L1: %.4f, l_adv: %.4f, errD: %.4f'
-                      % (step + 1, t, loss.item(), l_warp.item(), l_perceptual.item(), l_L1.item(), l_adv.item(),
-                         errD.item()),
-                      flush=True)
+                print('step: %8d, time: %.3f, loss_p: %4f, loss_up: %.4f, l_adv: %.4f, errD: %.4f'
+                      % (step + 1, t, loss_p.item(), loss_up.item(), l_adv.item(), errD.item()), flush=True)
                 step_start_time = time.time()
 
             if (step + 1) % opt.save_count == 0:
@@ -302,9 +276,9 @@ def train(opt, train_loader, G, D, board):
 
 def main():
     opt = get_opt()
-    opt.cuda = False
-    opt.batch_size = 1
-    opt.name = "test"
+    #     opt.cuda = False
+    #     opt.batch_size = 1
+    #     opt.name = "test"
     print(opt)
     print("Start to train stage: %s, named: %s!" % (opt.stage, opt.name))
 

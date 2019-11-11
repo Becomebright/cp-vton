@@ -12,3 +12,5 @@ data/*
 MPV
 dataset
 human_parsing/models
+1.jpg
+debug.py
