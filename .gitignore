@@ -10,3 +10,5 @@ result/*/*
 .idea
 data/*
 MPV
+dataset
+human_parsing/models

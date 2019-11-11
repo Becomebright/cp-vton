@@ -42,9 +42,9 @@ class CPDataset(data.Dataset):
             header = next(f_csv)
             for row in f_csv:
                 im_name, parse_name, c_name = row  # name是相对路径，而不只是文件名
-                im_names.append(im_name)
-                parse_names.append(parse_name)
-                c_names.append(c_name)
+                im_names.append(osp.join(opt.dataroot, im_name))
+                parse_names.append(osp.join(opt.dataroot, parse_name))
+                c_names.append(osp.join(opt.dataroot, c_name))
             # for line in f.readlines():
             #     im_name, c_name = line.strip().split()
             #     im_names.append(im_name)
@@ -146,11 +146,11 @@ class CPDataset(data.Dataset):
         parse_cloth = (parse_array == 5).astype(np.float32) + \
                       (parse_array == 6).astype(np.float32) + \
                       (parse_array == 7).astype(np.float32)
-        # parse_upper_body = (parse_array == 14).astype(np.float32) + \
-        #                    (parse_array == 15).astype(np.float32) + \
-        #                    (parse_array == 5).astype(np.float32) + \
-        #                    (parse_array == 6).astype(np.float32) + \
-        #                    (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
+        parse_upper_body = (parse_array == 14).astype(np.float32) + \
+                           (parse_array == 15).astype(np.float32) + \
+                           (parse_array == 5).astype(np.float32) + \
+                           (parse_array == 6).astype(np.float32) + \
+                           (parse_array == 7).astype(np.float32)  # 还缺少一个fixed bounding box around the neck keypoint
 
         def logical_minux(x, y):
             return x ^ np.logical_and(x, y)
@@ -173,7 +173,7 @@ class CPDataset(data.Dataset):
 
         # cloth-agnostic representation
         # agnostic = im * (~person)  # [-1,1], fill 0 for other parts
-        agnostic = im * (torch.ones_like(im_c) - im_c)
+        agnostic = im * (torch.ones_like(pcm) - pcm)
 
         if self.stage == 'GMM':
             im_g = Image.open('grid.png')
@@ -185,14 +185,14 @@ class CPDataset(data.Dataset):
             'c_name': c_name,  # for visualization
             'im_name': im_name,  # for visualization or ground truth
             'cloth': c,  # for input
-            'cloth_mask': cm,  # for input
+            # 'cloth_mask': cm,  # for input
             'image': im,  # for visualization
             'agnostic': agnostic,  # for input
             'parse_cloth': im_c,  # for ground truth
-            'parse_neck': parse_neck[np.newaxis, :],
+            # 'parse_neck': parse_neck[np.newaxis, :],
             'shape': shape,  # for visualization
-            'head': im_h,  # for visualization
-            'pose_image': im_pose,  # for visualization
+            # 'head': im_h,  # for visualization
+            # 'pose_image': im_pose,  # for visualization
             'grid_image': im_g,  # for visualization
             'parse_img': parse_array,
             'another_c_name': another_c_name,  # for visualization
@@ -244,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--fine_height", type=int, default=256)
     parser.add_argument("--radius", type=int, default=3)
     parser.add_argument("--shuffle", action='store_true', help='shuffle input data')
-    parser.add_argument('-b', '--batch-size', type=int, default=4)
+    parser.add_argument('-b', '--batch_size', type=int, default=4)
     parser.add_argument('-j', '--workers', type=int, default=1)
 
     opt = parser.parse_args()

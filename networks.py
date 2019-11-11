@@ -1,12 +1,16 @@
 # coding=utf-8
+import cv2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
 from torchvision import models
 import os
-
 import numpy as np
+from collections import OrderedDict
+import matplotlib.pyplot as plt
+
+from human_parsing.model import network
 
 
 def weights_init_normal(m):
@@ -193,9 +197,12 @@ class TpsGridGen(nn.Module):
             #     self.P_Y_base = self.P_Y_base.cuda()
 
     def forward(self, theta):
+        grid_X = self.grid_X
+        grid_Y = self.grid_Y
         # cuda
-        grid_X = self.grid_X.cuda()
-        grid_Y = self.grid_Y.cuda()
+        if self.use_cuda:
+            grid_X = grid_X.cuda()
+            grid_Y = grid_Y.cuda()
         warped_grid = self.apply_transformation(theta, torch.cat((grid_X, grid_Y), 3))
 
         return warped_grid
@@ -225,12 +232,18 @@ class TpsGridGen(nn.Module):
         # where points[:,:,:,0] are the X coords
         # and points[:,:,:,1] are the Y coords
 
+        P_X_base = self.P_X_base
+        P_Y_base = self.P_Y_base
+        P_X = self.P_X
+        P_Y = self.P_Y
+        Li = self.Li
         # cuda
-        P_X_base = self.P_X_base.cuda()
-        P_Y_base = self.P_Y_base.cuda()
-        P_X = self.P_X.cuda()
-        P_Y = self.P_Y.cuda()
-        Li = self.Li.cuda()
+        if self.use_cuda:
+            P_X_base = P_X_base.cuda()
+            P_Y_base = P_Y_base.cuda()
+            P_X = P_X.cuda()
+            P_Y = P_Y.cuda()
+            Li = Li.cuda()
 
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
@@ -312,13 +325,14 @@ class TpsGridGen(nn.Module):
 # at the bottleneck
 # model = UnetGenerator(3, 4, num_downs=6, ngf=64, norm_layer=nn.InstanceNorm2d)
 class UnetGenerator(nn.Module):
-    def __init__(self, input_nc=3, output_nc=3, num_downs=5, ngf=16,
-                 norm_layer=nn.BatchNorm2d, use_dropout=False):
+    def __init__(self, opt, input_nc=3, output_nc=3, num_downs=5, ngf=16,
+                 norm_layer=nn.BatchNorm2d):
         super(UnetGenerator, self).__init__()
 
+        self.use_cuda = opt.cuda
         self.extractionA = FeatureExtraction(input_nc, ngf, num_downs, nn.InstanceNorm2d)
         self.extractionB = FeatureExtraction(input_nc, ngf, num_downs, nn.InstanceNorm2d)
-        self.decoder = Decoder(input_nc=ngf*(2**num_downs), output_nc=output_nc,
+        self.decoder = Decoder(input_nc=ngf * (2 ** num_downs), output_nc=output_nc,
                                num_ups=num_downs, norm_layer=norm_layer)
         # self.l2norm = FeatureL2Norm()
 
@@ -326,7 +340,7 @@ class UnetGenerator(nn.Module):
         outputA = self.extractionA(inputA)
         outputB = self.extractionB(inputB)
         for i, f in enumerate(self.extractionA.features):
-            gridGen = TpsGridGen(f.size(2), f.size(3), use_cuda=True, grid_size=5)
+            gridGen = TpsGridGen(f.size(2), f.size(3), use_cuda=self.use_cuda, grid_size=5)
             grid = gridGen(theta)
             self.extractionA.features[i] = F.grid_sample(f, grid, padding_mode='zeros')
         return self.decoder(outputA, self.extractionA.features, outputB, self.extractionB.features)
@@ -350,16 +364,16 @@ class Decoder(nn.Module):
         in_channel = input_nc
         for i in range(num_ups - 1):
             self.layers.append(nn.Sequential(
-                nn.Conv2d(in_channel, in_channel//2, kernel_size=3, stride=1, padding=1, bias=use_bias),
+                nn.Conv2d(in_channel, in_channel // 2, kernel_size=3, stride=1, padding=1, bias=use_bias),
                 nn.ReLU(True),
-                norm_layer(in_channel//2),
-                nn.ConvTranspose2d(in_channel//2, in_channel//4, kernel_size=4, stride=2, padding=1, bias=use_bias),
+                norm_layer(in_channel // 2),
+                nn.ConvTranspose2d(in_channel // 2, in_channel // 4, kernel_size=4, stride=2, padding=1, bias=use_bias),
                 nn.ReLU(True),
-                norm_layer(in_channel//4)
+                norm_layer(in_channel // 4)
             ))
             in_channel //= 2
 
-        self.conv11 = nn.Conv2d(in_channel//2, output_nc, kernel_size=1, stride=1, padding=0)
+        self.conv11 = nn.Conv2d(in_channel // 2, output_nc, kernel_size=1, stride=1, padding=0)
 
     def forward(self, xA, featuresA, xB, featuresB):
         x = torch.cat([xA, xB], 1)
@@ -438,7 +452,6 @@ class VGGLoss(nn.Module):
     def __init__(self, layids=None):
         super(VGGLoss, self).__init__()
         self.vgg = Vgg19()
-        self.vgg.cuda()
         self.criterion = nn.L1Loss()
         self.weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
         self.layids = layids
@@ -463,7 +476,7 @@ class CGM(nn.Module):
         self.extractionB = FeatureExtraction(3, ngf=16, n_layers=5, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
-        self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=True)
+        self.regression = FeatureRegression(input_nc=48, output_dim=2 * opt.grid_size ** 2, use_cuda=opt.cuda)
         # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
 
     def forward(self, cloth, masked_person):
@@ -477,19 +490,66 @@ class CGM(nn.Module):
         return theta
 
 
+class HumanParser(nn.Module):
+    def __init__(self, opt, num_classes=20,
+                 restore_weight='human_parsing/models/exp-schp-201908261155-lip.pth'):
+        super(HumanParser, self).__init__()
+        self.model = network(num_classes=num_classes, pretrained=None)
+        state_dict = torch.load(restore_weight)
+
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k[7:]  # remove 'module.' of DataParallel
+            new_state_dict[name] = v
+        self.opt = opt
+        self.model.load_state_dict(new_state_dict)
+        self.mean = torch.FloatTensor([0.406, 0.456, 0.485]).unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        self.std = torch.FloatTensor([0.225, 0.224, 0.229]).unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        self.upsample = torch.nn.Upsample(size=[473, 473], mode='bilinear', align_corners=True)  # to (473, 473)
+        self.downsample = torch.nn.Upsample(size=[opt.fine_height, opt.fine_width], mode='bilinear', align_corners=True)  # to (473, 473)
+
+    def _normalize(self, x):
+        """
+        :param x: (N,C,H,W)
+        :return: (N,C,H,W)
+        """
+        mean = self.mean
+        std = self.std
+        if self.opt.cuda:
+            mean = mean.cuda()
+            std = std.cuda()
+        return (x - mean) / std
+
+    def forward(self, image):
+        """
+        :param image: (N, C, H, W)
+        :return: parsed_image: (N, num_classes, H, W)
+        """
+        img = image.clone()
+        img = (img + 1.) / 2.
+        img = self._normalize(img)
+        img = self.upsample(img)
+        parse = self.model(img)  # (N,C,H,W)
+        parse = self.downsample(parse)
+        parse = parse.argmax(1)  # (N,H,W)
+        del img
+        return parse
+
+
 class WUTON(nn.Module):
     def __init__(self, opt):
         super(WUTON, self).__init__()
         self.cgm = CGM(opt)
-        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
-        self.unet = UnetGenerator()
+        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=opt.cuda, grid_size=opt.grid_size)
+        self.unet = UnetGenerator(opt=opt)  # [-1, 1]
 
     def forward(self, cloth, masked_person):
         theta = self.cgm(cloth, masked_person)
         grid = self.gridGen(theta)
         warped_cloth = F.grid_sample(cloth, grid, padding_mode='border')
-        synthesized_person = self.unet(cloth, masked_person, theta)
-        return warped_cloth, synthesized_person
+        fake_person = self.unet(cloth, masked_person, theta)
+
+        return warped_cloth, fake_person
 
 
 def save_checkpoint(model, save_path):
